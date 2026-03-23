@@ -17,7 +17,6 @@ export default function App() {
   const [fileContent, setFileContent] = useState('');
   const [isDirty, setIsDirty] = useState(false);
   const [activeTab, setActiveTab] = useState('graph');
-  const [showRunner, setShowRunner] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -127,11 +126,11 @@ export default function App() {
           ↺ Refresh
         </button>
         <button
-          onClick={() => setShowRunner(s => !s)}
+          onClick={() => setActiveTab('runner')}
           style={{
-            background: showRunner ? '#1f6feb' : '#21262d',
-            color: showRunner ? '#fff' : '#8b949e',
-            border: `1px solid ${showRunner ? '#1f6feb' : '#30363d'}`,
+            background: activeTab === 'runner' ? '#1f6feb' : '#21262d',
+            color: activeTab === 'runner' ? '#fff' : '#8b949e',
+            border: `1px solid ${activeTab === 'runner' ? '#1f6feb' : '#30363d'}`,
             padding: '5px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12
           }}
         >
@@ -174,6 +173,9 @@ export default function App() {
             <button style={activeTab === 'editor' ? TAB_STYLES.active : TAB_STYLES.inactive} onClick={() => setActiveTab('editor')}>
               ✎ Editor {isDirty ? '●' : ''}
             </button>
+            <button style={activeTab === 'runner' ? TAB_STYLES.active : TAB_STYLES.inactive} onClick={() => setActiveTab('runner')}>
+              ▶ Run
+            </button>
             {activeTab === 'editor' && selectedFile && (
               <>
                 <span style={{ fontSize: 11, color: '#8b949e', marginLeft: 8 }}>
@@ -213,19 +215,10 @@ export default function App() {
                 onChange={val => { setFileContent(val); setIsDirty(true); }}
               />
             )}
+            {activeTab === 'runner' && <ClaudeRunner />}
           </div>
         </div>
       </div>
-
-      {/* Claude Runner panel */}
-      {showRunner && (
-        <div style={{
-          height: 320, flexShrink: 0,
-          background: '#0d1117', borderTop: '1px solid #30363d'
-        }}>
-          <ClaudeRunner />
-        </div>
-      )}
     </div>
   );
 }

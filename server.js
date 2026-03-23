@@ -564,8 +564,28 @@ app.get('/api/projects', (_req, res) => {
   res.json(projects);
 });
 
+app.get('/api/commands', (_req, res) => {
+  const commandsDir = path.join(CLAUDE_DIR, 'commands');
+  const commands = [];
+  try {
+    const domains = fs.readdirSync(commandsDir, { withFileTypes: true })
+      .filter(e => e.isDirectory() && !SKIP_DIRS.has(e.name));
+    domains.forEach(domain => {
+      try {
+        fs.readdirSync(path.join(commandsDir, domain.name))
+          .filter(f => f.endsWith('.md'))
+          .forEach(file => {
+            const name = path.basename(file, '.md');
+            commands.push({ id: `${domain.name}:${name}`, domain: domain.name, name });
+          });
+      } catch {}
+    });
+  } catch {}
+  res.json(commands);
+});
+
 app.post('/api/run-claude', (req, res) => {
-  const { projectPath, prompt } = req.body;
+  const { projectPath, prompt, allowPermissions } = req.body;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -575,7 +595,10 @@ app.post('/api/run-claude', (req, res) => {
   const send = data => res.write(`data: ${JSON.stringify(data)}\n\n`);
   send({ type: 'start', message: `Running in ${projectPath}` });
 
-  const proc = spawn('claude', ['-p', prompt], {
+  const args = ['-p', prompt];
+  if (allowPermissions) args.push('--dangerously-skip-permissions');
+
+  const proc = spawn('claude', args, {
     cwd: projectPath,
     env: { ...process.env }
   });

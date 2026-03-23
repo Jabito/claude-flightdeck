@@ -70,11 +70,16 @@ export async function getProjects() {
   return r.json();
 }
 
-export function runClaude(projectPath, prompt, onData) {
+export async function getCommands() {
+  const r = await fetch(`${BASE}/commands`);
+  return r.json();
+}
+
+export function runClaude(projectPath, prompt, allowPermissions, onData) {
   return fetch(`${BASE}/run-claude`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectPath, prompt })
+    body: JSON.stringify({ projectPath, prompt, allowPermissions })
   }).then(response => {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
