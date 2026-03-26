@@ -503,9 +503,10 @@ app.get('/api/bitbucket-repos', async (_req, res) => {
     const tokenIdx = args.indexOf('--bitbucket-token');
     const wsIdx    = args.indexOf('--default-workspace');
     const token     = tokenIdx >= 0 ? args[tokenIdx + 1] : null;
-    const workspace = wsIdx    >= 0 ? args[wsIdx    + 1] : 'maxicare';
+    const workspace = wsIdx    >= 0 ? args[wsIdx    + 1] : null;
 
     if (!token) return res.json({ error: 'No Bitbucket token configured' });
+    if (!workspace) return res.json({ error: 'No Bitbucket workspace configured' });
 
     const resp = await fetch(
       `https://api.bitbucket.org/2.0/repositories/${workspace}?pagelen=50&sort=-updated_on`,
@@ -1059,7 +1060,7 @@ function savePolls(polls) {
 
 function getAtlassianConfig() {
   try {
-    // 1. Check plugins.local.md for jira_url + jira_pat (Rakuten on-prem / PAT auth)
+    // 1. Check plugins.local.md for jira_url + jira_pat (on-prem / PAT auth)
     const pluginsPath = path.join(CLAUDE_DIR, 'plugins.local.md');
     if (fs.existsSync(pluginsPath)) {
       const pluginsText = fs.readFileSync(pluginsPath, 'utf8');

@@ -1,6 +1,8 @@
 node_modules/
 client/node_modules/
 client/dist/
+.env
+.env.*
 
 # Runtime data — local to each user, not for repo
 command-runs.json

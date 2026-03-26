@@ -1,8 +1,13 @@
 # Claude Flightdeck
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
+
 A visual control panel for [Claude Code](https://claude.ai/code) — manage your agent files, run commands, automate workflows via webhooks, JIRA polls, and schedules, and watch everything happen in real time.
 
 **Project Owner:** Jose Paolo "Javi" Javier
+
+> **Note:** Claude Flightdeck is a companion tool — it requires a working [Claude Code CLI](https://claude.ai/code) installation. It does not bundle or replace Claude Code itself.
 
 ---
 
@@ -130,9 +135,8 @@ For Jira Cloud (email + API token), configure instead in `~/.claude/settings.jso
 
 ```bash
 # Clone the repo
-git clone https://github.com/Jabito/claude-manager.git claude-flightdeck
+git clone https://github.com/Jabito/claude-flightdeck.git
 cd claude-flightdeck
-
 # Deploy (installs deps, builds client, starts via pm2)
 bash deploy.sh
 
@@ -193,6 +197,14 @@ PORT=4000 bash deploy.sh
 
 ---
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
+
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Please do not open public issues for security concerns.
+
 ## License
 
-MIT
+[MIT](LICENSE)
