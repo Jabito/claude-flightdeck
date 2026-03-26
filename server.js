@@ -2,12 +2,26 @@ const express = require('express');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const os = require('os');
 
 const app = express();
 const PORT = 3001;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+
+// Resolve full path to claude binary using the login shell (handles nvm, homebrew, etc.)
+let CLAUDE_BIN = 'claude';
+try {
+  CLAUDE_BIN = execFileSync('/bin/zsh', ['-l', '-c', 'which claude'], { encoding: 'utf8' }).trim();
+  console.log(`  claude → ${CLAUDE_BIN}`);
+} catch {
+  try {
+    CLAUDE_BIN = execFileSync('/bin/bash', ['-l', '-c', 'which claude'], { encoding: 'utf8' }).trim();
+    console.log(`  claude → ${CLAUDE_BIN}`);
+  } catch {
+    console.warn('  ⚠ could not resolve claude binary path, falling back to "claude"');
+  }
+}
 
 const SKIP_DIRS = new Set([
   'cache', 'session-env', 'sessions', 'shell-snapshots', 'telemetry',
@@ -584,30 +598,982 @@ app.get('/api/commands', (_req, res) => {
   res.json(commands);
 });
 
+// runId → child process; allows sending stdin feedback to non-permissive runs
+const claudeProcs = new Map();
+
+// ─── Command run persistence ──────────────────────────────────────────────────
+
+const COMMAND_RUNS_FILE = path.join(__dirname, 'command-runs.json');
+const MAX_COMMAND_RUNS = 100;
+
+function loadCommandRuns() {
+  try {
+    const runs = JSON.parse(fs.readFileSync(COMMAND_RUNS_FILE, 'utf8'));
+    // Mark any in-flight runs as interrupted (server restarted mid-run)
+    return runs.map(r => r.status === 'running'
+      ? { ...r, status: 'interrupted', endTime: new Date().toISOString() }
+      : r);
+  } catch { return []; }
+}
+
+function saveCommandRuns() {
+  try { fs.writeFileSync(COMMAND_RUNS_FILE, JSON.stringify(commandRunsStore, null, 2)); } catch {}
+}
+
+const commandRunsStore = loadCommandRuns();
+
 app.post('/api/run-claude', (req, res) => {
-  const { projectPath, prompt, allowPermissions } = req.body;
+  const { projectPath, prompt: rawPrompt, allowPermissions, runId, files, command: runCommand, args: runArgs } = req.body;
+
+  // Write any attached files to a temp dir and append their paths to the prompt
+  let prompt = rawPrompt;
+  let uploadDir = null;
+  if (Array.isArray(files) && files.length > 0) {
+    uploadDir = path.join(os.tmpdir(), `claude-uploads-${runId || Date.now()}`);
+    fs.mkdirSync(uploadDir, { recursive: true });
+    const filePaths = [];
+    for (const f of files) {
+      const safeName = path.basename(f.name).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = path.join(uploadDir, safeName);
+      fs.writeFileSync(filePath, f.content);
+      filePaths.push(filePath);
+    }
+    prompt = prompt + `\n\n---\nAttached files (read as needed):\n${filePaths.map(p => `- ${p}`).join('\n')}`;
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = data => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  // Build a persistent record for this run
+  const recId = runId || `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const runRecord = {
+    id: recId,
+    label: rawPrompt.split('\n')[0].slice(0, 80),
+    command: runCommand || '',
+    args: runArgs || '',
+    projectPath,
+    projectName: path.basename(projectPath),
+    allowPermissions: allowPermissions !== false,
+    status: 'running',
+    output: [],
+    startTime: new Date().toISOString(),
+    endTime: null,
+    exitCode: null
+  };
+  commandRunsStore.unshift(runRecord);
+  if (commandRunsStore.length > MAX_COMMAND_RUNS) commandRunsStore.pop();
+
+  // send() streams to the SSE client AND records to the run store
+  const send = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (data.type !== 'start') runRecord.output.push(data);
+  };
   send({ type: 'start', message: `Running in ${projectPath}` });
 
-  const args = ['-p', prompt];
+  const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
   if (allowPermissions) args.push('--dangerously-skip-permissions');
 
-  const proc = spawn('claude', args, {
+  const proc = spawn(CLAUDE_BIN, args, {
     cwd: projectPath,
-    env: { ...process.env }
+    env: { ...process.env },
+    stdio: ['pipe', 'pipe', 'pipe']
   });
 
-  proc.stdout.on('data', d => send({ type: 'output', message: d.toString() }));
+  if (runId) claudeProcs.set(runId, proc);
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', d => {
+    stdoutBuf += d.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop(); // keep incomplete line in buffer
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'text' && block.text) {
+              send({ type: 'output', message: block.text });
+            } else if (block.type === 'tool_use') {
+              const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
+              send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+            }
+          }
+        } else if (event.type === 'user') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'tool_result') {
+              const content = Array.isArray(block.content)
+                ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+                : String(block.content ?? '');
+              if (content) send({ type: 'tool_result', message: content.slice(0, 500) });
+            }
+          }
+        } else if (event.type === 'result') {
+          if (event.is_error) send({ type: 'error', message: event.result ?? 'Unknown error' });
+        }
+      } catch {
+        send({ type: 'output', message: line });
+      }
+    }
+  });
   proc.stderr.on('data', d => send({ type: 'error', message: d.toString() }));
-  proc.on('close', code => { send({ type: 'done', code }); res.end(); });
-  proc.on('error', err => { send({ type: 'error', message: err.message }); res.end(); });
-  req.on('close', () => proc.kill());
+  proc.on('close', (code, signal) => {
+    if (runId) claudeProcs.delete(runId);
+    if (uploadDir) try { fs.rmSync(uploadDir, { recursive: true, force: true }); } catch {}
+    runRecord.status = code === 0 ? 'done' : 'error';
+    runRecord.exitCode = code;
+    runRecord.endTime = new Date().toISOString();
+    saveCommandRuns();
+    send({ type: 'done', code, signal });
+    res.end();
+  });
+  proc.on('error', err => { send({ type: 'error', message: `spawn error: ${err.message}` }); });
+  res.on('close', () => {
+    if (runId) claudeProcs.delete(runId);
+    if (!res.writableEnded) proc.kill();
+  });
+});
+
+app.post('/api/run-claude/:runId/input', (req, res) => {
+  const proc = claudeProcs.get(req.params.runId);
+  if (!proc) return res.status(404).json({ error: 'Run not found or already finished' });
+  const { message } = req.body;
+  if (typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+  try {
+    proc.stdin.write(message + '\n');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/command-runs', (_req, res) => res.json(commandRunsStore));
+
+app.delete('/api/command-runs', (_req, res) => {
+  commandRunsStore.length = 0;
+  saveCommandRuns();
+  res.json({ success: true });
+});
+
+// ─── Webhook trigger system ───────────────────────────────────────────────────
+
+const WEBHOOKS_FILE = path.join(__dirname, 'webhooks.json');
+const WEBHOOK_RUNS_FILE = path.join(__dirname, 'webhook-runs.json');
+const MAX_WEBHOOK_RUNS = 100;
+
+function loadWebhookRuns() {
+  try {
+    const runs = JSON.parse(fs.readFileSync(WEBHOOK_RUNS_FILE, 'utf8'));
+    return runs.map(r => r.status === 'running'
+      ? { ...r, status: 'interrupted', endTime: new Date().toISOString() }
+      : r);
+  } catch { return []; }
+}
+
+function saveWebhookRuns() {
+  try { fs.writeFileSync(WEBHOOK_RUNS_FILE, JSON.stringify(webhookRunsStore, null, 2)); } catch {}
+}
+
+const webhookRunsStore = loadWebhookRuns(); // newest first, persisted
+const webhookProcs = new Map(); // execId → child process
+
+function loadWebhooks() {
+  try { return JSON.parse(fs.readFileSync(WEBHOOKS_FILE, 'utf8')); } catch { return []; }
+}
+
+function saveWebhooks(webhooks) {
+  fs.writeFileSync(WEBHOOKS_FILE, JSON.stringify(webhooks, null, 2));
+}
+
+// Resolve {{a.b.c}} template tokens against a JSON payload
+function resolveTemplate(template, payload) {
+  return template.replace(/\{\{([^}]+)\}\}/g, (_, dotPath) => {
+    const val = dotPath.trim().split('.').reduce((obj, k) => obj?.[k], payload);
+    return val != null ? String(val) : '';
+  });
+}
+
+function addWebhookRun(run) {
+  webhookRunsStore.unshift(run);
+  if (webhookRunsStore.length > MAX_WEBHOOK_RUNS) webhookRunsStore.pop();
+}
+
+function spawnWebhookProcess(run) {
+  const args = ['-p', run.prompt, '--output-format', 'stream-json', '--verbose'];
+  if (run.allowPermissions) args.push('--dangerously-skip-permissions');
+
+  const proc = spawn(CLAUDE_BIN, args, {
+    cwd: run.projectPath,
+    env: { ...process.env },
+    stdio: [run.allowPermissions ? 'ignore' : 'pipe', 'pipe', 'pipe']
+  });
+
+  webhookProcs.set(run.execId, proc);
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', d => {
+    stdoutBuf += d.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
+            else if (block.type === 'tool_use') run.output.push({ type: 'tool', message: `⚙ ${block.name}` });
+          }
+        } else if (event.type === 'result' && event.is_error) {
+          run.output.push({ type: 'error', message: event.result ?? 'Unknown error' });
+        }
+      } catch {
+        run.output.push({ type: 'output', message: line });
+      }
+    }
+  });
+  proc.stderr.on('data', d => run.output.push({ type: 'error', message: d.toString() }));
+  proc.on('close', (code) => {
+    webhookProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = code === 0 ? 'done' : 'error';
+      run.exitCode = code;
+      run.endTime = new Date().toISOString();
+    }
+    saveWebhookRuns();
+  });
+  proc.on('error', err => {
+    webhookProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = 'error';
+      run.output.push({ type: 'error', message: `spawn error: ${err.message}` });
+      run.endTime = new Date().toISOString();
+    }
+    saveWebhookRuns();
+  });
+}
+
+// ── Webhook CRUD
+app.get('/api/webhooks', (_req, res) => res.json(loadWebhooks()));
+
+app.post('/api/webhooks', (req, res) => {
+  const webhooks = loadWebhooks();
+  const webhook = { id: Date.now().toString(), ...req.body, createdAt: new Date().toISOString() };
+  webhooks.push(webhook);
+  saveWebhooks(webhooks);
+  res.json(webhook);
+});
+
+app.put('/api/webhooks/:id', (req, res) => {
+  const webhooks = loadWebhooks();
+  const idx = webhooks.findIndex(w => w.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: 'Not found' });
+  webhooks[idx] = { ...webhooks[idx], ...req.body };
+  saveWebhooks(webhooks);
+  res.json(webhooks[idx]);
+});
+
+app.delete('/api/webhooks/:id', (req, res) => {
+  const webhooks = loadWebhooks().filter(w => w.id !== req.params.id);
+  saveWebhooks(webhooks);
+  res.json({ success: true });
+});
+
+// ── Recent runs
+app.get('/api/webhooks/runs', (_req, res) => res.json(webhookRunsStore));
+
+// ── Public trigger endpoint (called by external services, e.g. JIRA)
+app.post('/webhooks/:triggerKey', (req, res) => {
+  const config = loadWebhooks().find(w => w.triggerKey === req.params.triggerKey && w.enabled !== false);
+  if (!config) return res.status(404).json({ error: 'Webhook trigger not found or disabled' });
+
+  // Optional secret validation via X-Webhook-Secret header
+  if (config.secret) {
+    const provided = req.headers['x-webhook-secret'];
+    if (provided !== config.secret) return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+
+  const payload = req.body;
+  const args = config.argTemplate ? resolveTemplate(config.argTemplate, payload).trim() : '';
+  const prompt = args ? `/${config.command} ${args}` : `/${config.command}`;
+
+  if (!config.projectPath?.startsWith(os.homedir())) {
+    return res.status(400).json({ error: 'Webhook project path is not configured or invalid' });
+  }
+
+  const execId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const run = {
+    execId,
+    webhookId: config.id,
+    webhookName: config.name,
+    triggerKey: config.triggerKey,
+    command: config.command,
+    projectPath: config.projectPath,
+    prompt,
+    resolvedArgs: args,
+    payload: JSON.stringify(payload).slice(0, 1000),
+    status: 'running',
+    output: [{ type: 'meta', message: `Triggered by webhook — ${prompt}` }],
+    allowPermissions: config.allowPermissions ?? true,
+    startTime: new Date().toISOString(),
+    endTime: null,
+    exitCode: null
+  };
+
+  addWebhookRun(run);
+  spawnWebhookProcess(run);
+
+  res.json({ success: true, execId, prompt });
+});
+
+// ── Send stdin input to a running webhook process
+app.post('/api/webhooks/runs/:execId/input', (req, res) => {
+  const proc = webhookProcs.get(req.params.execId);
+  if (!proc) return res.status(404).json({ error: 'Run not found or already finished' });
+  const { message } = req.body;
+  if (typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+  try {
+    proc.stdin.write(message + '\n');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Kill a running webhook process
+app.delete('/api/webhooks/runs/:execId', (req, res) => {
+  const run = webhookRunsStore.find(r => r.execId === req.params.execId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  const proc = webhookProcs.get(req.params.execId);
+  if (proc) {
+    proc.kill();
+    webhookProcs.delete(req.params.execId);
+  }
+
+  if (run.status === 'running') {
+    run.status = 'killed';
+    run.endTime = new Date().toISOString();
+    run.output.push({ type: 'meta', message: '⚠ Process killed by user' });
+  }
+
+  saveWebhookRuns();
+  res.json({ success: true });
+});
+
+// ── Test trigger (same logic, but initiated from the UI)
+app.post('/api/webhooks/:id/test', (req, res) => {
+  const config = loadWebhooks().find(w => w.id === req.params.id);
+  if (!config) return res.status(404).json({ error: 'Webhook not found' });
+
+  if (!config.projectPath?.startsWith(os.homedir())) {
+    return res.status(400).json({ error: 'Webhook project path is not configured or invalid' });
+  }
+
+  const payload = req.body ?? {};
+  const args = config.argTemplate ? resolveTemplate(config.argTemplate, payload).trim() : '';
+  const prompt = args ? `/${config.command} ${args}` : `/${config.command}`;
+
+  const execId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const run = {
+    execId,
+    webhookId: config.id,
+    webhookName: config.name,
+    triggerKey: config.triggerKey,
+    command: config.command,
+    projectPath: config.projectPath,
+    prompt,
+    resolvedArgs: args,
+    payload: JSON.stringify(payload).slice(0, 1000),
+    status: 'running',
+    output: [{ type: 'meta', message: `Manual test — ${prompt}` }],
+    allowPermissions: config.allowPermissions ?? true,
+    startTime: new Date().toISOString(),
+    endTime: null,
+    exitCode: null
+  };
+
+  addWebhookRun(run);
+  spawnWebhookProcess(run);
+
+  res.json({ success: true, execId, prompt });
+});
+
+// ─── JIRA Poll system ─────────────────────────────────────────────────────────
+
+const POLLS_FILE = path.join(__dirname, 'polls.json');
+const POLL_RUNS_FILE = path.join(__dirname, 'poll-runs.json');
+const MAX_POLL_RUNS = 100;
+
+function loadPollRuns() {
+  try {
+    const runs = JSON.parse(fs.readFileSync(POLL_RUNS_FILE, 'utf8'));
+    return runs.map(r => r.status === 'running'
+      ? { ...r, status: 'interrupted', endTime: new Date().toISOString() }
+      : r);
+  } catch { return []; }
+}
+function savePollRuns() {
+  try { fs.writeFileSync(POLL_RUNS_FILE, JSON.stringify(pollRunsStore, null, 2)); } catch {}
+}
+
+const pollRunsStore = loadPollRuns(); // newest first
+const pollProcs = new Map(); // execId → child process
+const pollSeenKeys = new Map(); // pollId → Set<issueKey> (in-memory dedup per session)
+
+function loadPolls() {
+  try { return JSON.parse(fs.readFileSync(POLLS_FILE, 'utf8')); } catch { return []; }
+}
+
+function savePolls(polls) {
+  fs.writeFileSync(POLLS_FILE, JSON.stringify(polls, null, 2));
+}
+
+function getAtlassianConfig() {
+  try {
+    // 1. Check plugins.local.md for jira_url + jira_pat (Rakuten on-prem / PAT auth)
+    const pluginsPath = path.join(CLAUDE_DIR, 'plugins.local.md');
+    if (fs.existsSync(pluginsPath)) {
+      const pluginsText = fs.readFileSync(pluginsPath, 'utf8');
+      const jiraUrl = (pluginsText.match(/^jira_url:\s*(.+)$/m) || [])[1]?.trim();
+      const jiraPat = (pluginsText.match(/^jira_pat:\s*(.+)$/m) || [])[1]?.trim();
+      if (jiraUrl && jiraPat) return { baseUrl: jiraUrl, pat: jiraPat };
+    }
+    // 2. Fall back to settings.json env vars (Atlassian Cloud / email+token)
+    const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
+    const mcpEnv = settings.mcpServers?.atlassian?.env || {};
+    const settingsEnv = settings.env || {};
+    const baseUrl = mcpEnv.ATLASSIAN_BASE_URL || settingsEnv.ATLASSIAN_BASE_URL || '';
+    const email = mcpEnv.ATLASSIAN_EMAIL || settingsEnv.ATLASSIAN_EMAIL || '';
+    const token = mcpEnv.ATLASSIAN_API_TOKEN || settingsEnv.ATLASSIAN_API_TOKEN || '';
+    if (!baseUrl || !email || !token) return null;
+    return { baseUrl, email, token };
+  } catch { return null; }
+}
+
+async function queryJiraIssues(jqlFilter, config, maxResults = 10) {
+  // PAT (Bearer) auth for Jira Server/DC uses api/2; Basic auth (Cloud) uses api/3
+  const apiVersion = config.pat ? '2' : '3';
+  const url = `${config.baseUrl}/rest/api/${apiVersion}/search?jql=${encodeURIComponent(jqlFilter)}&maxResults=${maxResults}&fields=key,summary,status,assignee,issuetype`;
+  const authHeader = config.pat
+    ? `Bearer ${config.pat}`
+    : `Basic ${Buffer.from(`${config.email}:${config.token}`).toString('base64')}`;
+  const resp = await fetch(url, {
+    headers: {
+      'Authorization': authHeader,
+      'Accept': 'application/json'
+    }
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Jira API ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+function addPollRun(run) {
+  pollRunsStore.unshift(run);
+  if (pollRunsStore.length > MAX_POLL_RUNS) pollRunsStore.pop();
+}
+
+function spawnPollProcess(run) {
+  const args = ['-p', run.prompt, '--output-format', 'stream-json', '--verbose'];
+  if (run.allowPermissions) args.push('--dangerously-skip-permissions');
+
+  const proc = spawn(CLAUDE_BIN, args, {
+    cwd: run.projectPath,
+    env: { ...process.env },
+    stdio: [run.allowPermissions ? 'ignore' : 'pipe', 'pipe', 'pipe']
+  });
+
+  pollProcs.set(run.execId, proc);
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', d => {
+    stdoutBuf += d.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
+            else if (block.type === 'tool_use') {
+              const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
+              run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+            }
+          }
+        } else if (event.type === 'user') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'tool_result') {
+              const content = Array.isArray(block.content)
+                ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+                : String(block.content ?? '');
+              if (content) run.output.push({ type: 'tool_result', message: content.slice(0, 500) });
+            }
+          }
+        } else if (event.type === 'result' && event.is_error) {
+          run.output.push({ type: 'error', message: event.result ?? 'Unknown error' });
+        }
+      } catch {
+        run.output.push({ type: 'output', message: line });
+      }
+    }
+  });
+  proc.stderr.on('data', d => run.output.push({ type: 'error', message: d.toString() }));
+  proc.on('close', (code) => {
+    pollProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = code === 0 ? 'done' : 'error';
+      run.exitCode = code;
+      run.endTime = new Date().toISOString();
+    }
+    savePollRuns();
+  });
+  proc.on('error', err => {
+    pollProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = 'error';
+      run.output.push({ type: 'error', message: `spawn error: ${err.message}` });
+      run.endTime = new Date().toISOString();
+    }
+    savePollRuns();
+  });
+}
+
+function createPollRun(pollConfig, issue) {
+  const issueCtx = {
+    key: issue.key,
+    summary: issue.fields?.summary || '',
+    status: issue.fields?.status?.name || '',
+    assignee: issue.fields?.assignee?.displayName || '',
+    type: issue.fields?.issuetype?.name || ''
+  };
+  const args = pollConfig.argTemplate
+    ? resolveTemplate(pollConfig.argTemplate, issueCtx).trim()
+    : issue.key;
+  const prompt = args ? `/${pollConfig.command} ${args}` : `/${pollConfig.command}`;
+  const execId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  return {
+    execId,
+    source: 'poll',
+    pollId: pollConfig.id,
+    pollName: pollConfig.name,
+    issueKey: issue.key,
+    issueSummary: issueCtx.summary,
+    command: pollConfig.command,
+    projectPath: pollConfig.projectPath,
+    prompt,
+    resolvedArgs: args,
+    status: 'running',
+    output: [{ type: 'meta', message: `Poll "${pollConfig.name}" — ${prompt}\n  issue: ${issue.key} — ${issueCtx.summary}` }],
+    allowPermissions: pollConfig.allowPermissions ?? true,
+    startTime: new Date().toISOString(),
+    endTime: null,
+    exitCode: null
+  };
+}
+
+async function runPollCheck(pollConfig) {
+  const config = getAtlassianConfig();
+  if (!config) {
+    console.warn(`  ⚠ Poll "${pollConfig.name}": no Atlassian config in settings.json`);
+    return;
+  }
+
+  // Update lastRun immediately to prevent double-firing if check takes >1 minute
+  const polls = loadPolls();
+  const idx = polls.findIndex(p => p.id === pollConfig.id);
+  if (idx >= 0) {
+    polls[idx].lastRun = new Date().toISOString();
+    savePolls(polls);
+  }
+
+  try {
+    const maxPerRun = pollConfig.maxPerRun || 5;
+    const data = await queryJiraIssues(pollConfig.jqlFilter, config, maxPerRun);
+    const issues = (data.issues || []).slice(0, maxPerRun);
+
+    if (!pollSeenKeys.has(pollConfig.id)) {
+      // First run since startup: establish baseline without triggering
+      pollSeenKeys.set(pollConfig.id, new Set(issues.map(i => i.key)));
+      console.log(`  ◑ Poll "${pollConfig.name}": baseline ${issues.length} issue(s), no trigger on first run`);
+      return;
+    }
+
+    const seen = pollSeenKeys.get(pollConfig.id);
+    const newIssues = issues.filter(i => !seen.has(i.key));
+    if (newIssues.length === 0) {
+      console.log(`  ◑ Poll "${pollConfig.name}": no new issues`);
+      return;
+    }
+
+    for (const issue of newIssues) {
+      if (!pollConfig.projectPath?.startsWith(os.homedir())) continue;
+      seen.add(issue.key);
+      const run = createPollRun(pollConfig, issue);
+      addPollRun(run);
+      spawnPollProcess(run);
+      console.log(`  ⚡ Poll "${pollConfig.name}": triggered for ${issue.key}`);
+    }
+  } catch (e) {
+    console.error(`  ✗ Poll "${pollConfig.name}" error:`, e.message);
+  }
+}
+
+// Check polls every minute
+setInterval(() => {
+  const now = Date.now();
+  loadPolls()
+    .filter(p => p.enabled !== false && p.jqlFilter && p.command && p.projectPath)
+    .forEach(poll => {
+      const intervalMs = Math.max(5, poll.intervalMinutes || 30) * 60_000;
+      const nextRun = poll.lastRun ? new Date(poll.lastRun).getTime() + intervalMs : 0;
+      if (now >= nextRun) {
+        runPollCheck(poll).catch(e => console.error('Poll error:', e.message));
+      }
+    });
+}, 60_000);
+
+// ── Poll CRUD
+app.get('/api/polls', (_req, res) => res.json(loadPolls()));
+
+app.post('/api/polls', (req, res) => {
+  const polls = loadPolls();
+  const poll = { id: Date.now().toString(), ...req.body, lastRun: null, createdAt: new Date().toISOString() };
+  polls.push(poll);
+  savePolls(polls);
+  res.json(poll);
+});
+
+app.put('/api/polls/:id', (req, res) => {
+  const polls = loadPolls();
+  const idx = polls.findIndex(p => p.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: 'Not found' });
+  polls[idx] = { ...polls[idx], ...req.body };
+  savePolls(polls);
+  res.json(polls[idx]);
+});
+
+app.delete('/api/polls/:id', (req, res) => {
+  savePolls(loadPolls().filter(p => p.id !== req.params.id));
+  pollSeenKeys.delete(req.params.id);
+  res.json({ success: true });
+});
+
+app.get('/api/polls/runs', (_req, res) => res.json(pollRunsStore));
+
+app.post('/api/polls/runs/:execId/input', (req, res) => {
+  const proc = pollProcs.get(req.params.execId);
+  if (!proc) return res.status(404).json({ error: 'Run not found or already finished' });
+  const { message } = req.body;
+  if (typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+  try {
+    proc.stdin.write(message + '\n');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/polls/runs/:execId', (req, res) => {
+  const run = pollRunsStore.find(r => r.execId === req.params.execId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const proc = pollProcs.get(req.params.execId);
+  if (proc) { proc.kill(); pollProcs.delete(req.params.execId); }
+  if (run.status === 'running') {
+    run.status = 'killed';
+    run.endTime = new Date().toISOString();
+    run.output.push({ type: 'meta', message: '⚠ Process killed by user' });
+  }
+  savePollRuns();
+  res.json({ success: true });
+});
+
+// Test: query JIRA and fire for all matching issues (bypasses dedup)
+app.post('/api/polls/:id/test', async (req, res) => {
+  const config = loadPolls().find(p => p.id === req.params.id);
+  if (!config) return res.status(404).json({ error: 'Poll not found' });
+  if (!config.projectPath?.startsWith(os.homedir())) {
+    return res.status(400).json({ error: 'Poll project path is not configured or invalid' });
+  }
+  const jiraConfig = getAtlassianConfig();
+  if (!jiraConfig) return res.status(400).json({ error: 'No Atlassian config found in settings.json' });
+  try {
+    const maxPerRun = config.maxPerRun || 5;
+    const data = await queryJiraIssues(config.jqlFilter, jiraConfig, maxPerRun);
+    const issues = (data.issues || []).slice(0, maxPerRun);
+    if (issues.length === 0) {
+      return res.json({ success: true, message: 'No issues matched the JQL filter', execIds: [] });
+    }
+    const execIds = [];
+    for (const issue of issues) {
+      const run = createPollRun(config, issue);
+      addPollRun(run);
+      spawnPollProcess(run);
+      execIds.push(run.execId);
+    }
+    res.json({ success: true, issueCount: issues.length, execIds });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Scheduled Runs ────────────────────────────────────────────────────────────
+
+const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
+const SCHEDULE_RUNS_FILE = path.join(__dirname, 'schedule-runs.json');
+const MAX_SCHEDULE_RUNS = 100;
+
+function loadSchedules() {
+  try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8')); } catch { return []; }
+}
+function saveSchedules(list) {
+  try { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(list, null, 2)); } catch {}
+}
+function loadScheduleRuns() {
+  try {
+    const runs = JSON.parse(fs.readFileSync(SCHEDULE_RUNS_FILE, 'utf8'));
+    return runs.map(r => r.status === 'running'
+      ? { ...r, status: 'interrupted', endTime: new Date().toISOString() }
+      : r);
+  } catch { return []; }
+}
+function saveScheduleRuns() {
+  try { fs.writeFileSync(SCHEDULE_RUNS_FILE, JSON.stringify(scheduleRunsStore, null, 2)); } catch {}
+}
+
+const scheduleRunsStore = loadScheduleRuns(); // newest first
+const scheduleProcs = new Map();  // execId → child process
+const scheduleTimers = new Map(); // scheduleId → timer handle
+
+function buildSchedulePrompt(schedule) {
+  if (schedule.command) {
+    const base = `/${schedule.command}`;
+    return schedule.args?.trim() ? `${base} ${schedule.args.trim()}` : base;
+  }
+  return schedule.freePrompt || '';
+}
+
+function addScheduleRun(run) {
+  scheduleRunsStore.unshift(run);
+  if (scheduleRunsStore.length > MAX_SCHEDULE_RUNS) scheduleRunsStore.pop();
+}
+
+function spawnScheduleProcess(run) {
+  const args = ['-p', run.prompt, '--output-format', 'stream-json', '--verbose'];
+  if (run.allowPermissions) args.push('--dangerously-skip-permissions');
+
+  const proc = spawn(CLAUDE_BIN, args, {
+    cwd: run.projectPath,
+    env: { ...process.env },
+    stdio: [run.allowPermissions ? 'ignore' : 'pipe', 'pipe', 'pipe']
+  });
+
+  scheduleProcs.set(run.execId, proc);
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', d => {
+    stdoutBuf += d.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
+            else if (block.type === 'tool_use') {
+              const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
+              run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+            }
+          }
+        } else if (event.type === 'user') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'tool_result') {
+              const content = Array.isArray(block.content)
+                ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+                : String(block.content ?? '');
+              if (content) run.output.push({ type: 'tool_result', message: content.slice(0, 500) });
+            }
+          }
+        } else if (event.type === 'result' && event.is_error) {
+          run.output.push({ type: 'error', message: event.result ?? 'Unknown error' });
+        }
+      } catch {
+        run.output.push({ type: 'output', message: line });
+      }
+    }
+  });
+  proc.stderr.on('data', d => run.output.push({ type: 'error', message: d.toString() }));
+  proc.on('close', (code) => {
+    scheduleProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = code === 0 ? 'done' : 'error';
+      run.exitCode = code;
+      run.endTime = new Date().toISOString();
+    }
+    saveScheduleRuns();
+  });
+  proc.on('error', err => {
+    scheduleProcs.delete(run.execId);
+    if (run.status === 'running') {
+      run.status = 'error';
+      run.output.push({ type: 'error', message: `spawn error: ${err.message}` });
+      run.endTime = new Date().toISOString();
+    }
+    saveScheduleRuns();
+  });
+}
+
+function triggerSchedule(schedule) {
+  const prompt = buildSchedulePrompt(schedule);
+  if (!prompt || !schedule.projectPath) return null;
+
+  const execId = `sched-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const run = {
+    execId, source: 'schedule',
+    scheduleId: schedule.id, scheduleName: schedule.name,
+    prompt, projectPath: schedule.projectPath,
+    allowPermissions: schedule.allowPermissions !== false,
+    status: 'running', output: [],
+    startTime: new Date().toISOString(), endTime: null, exitCode: null
+  };
+  addScheduleRun(run);
+  spawnScheduleProcess(run);
+  console.log(`  ⏰ Schedule "${schedule.name}": triggered`);
+
+  const list = loadSchedules();
+  const idx = list.findIndex(s => s.id === schedule.id);
+  if (idx !== -1) {
+    const intervalMs = (list[idx].intervalMinutes || 30) * 60 * 1000;
+    list[idx].lastRun = run.startTime;
+    list[idx].nextRun = new Date(Date.now() + intervalMs).toISOString();
+    saveSchedules(list);
+  }
+  return execId;
+}
+
+function stopScheduleTimer(scheduleId) {
+  const timer = scheduleTimers.get(scheduleId);
+  if (timer) { clearInterval(timer); scheduleTimers.delete(scheduleId); }
+}
+
+function startScheduleTimer(schedule) {
+  stopScheduleTimer(schedule.id);
+  if (!schedule.enabled) return;
+
+  const intervalMs = (schedule.intervalMinutes || 30) * 60 * 1000;
+
+  // Fire immediately if overdue (e.g., after server restart)
+  if (schedule.nextRun && new Date(schedule.nextRun).getTime() <= Date.now()) {
+    triggerSchedule(schedule);
+  }
+
+  const timer = setInterval(() => {
+    const list = loadSchedules();
+    const current = list.find(s => s.id === schedule.id);
+    if (!current?.enabled) { stopScheduleTimer(schedule.id); return; }
+    triggerSchedule(current);
+  }, intervalMs);
+
+  scheduleTimers.set(schedule.id, timer);
+}
+
+// Init on server start
+{
+  const schedules = loadSchedules();
+  const active = schedules.filter(s => s.enabled);
+  active.forEach(startScheduleTimer);
+  if (active.length > 0) console.log(`  ⏰ ${active.length} schedule(s) active`);
+}
+
+// ─── Schedule routes ──────────────────────────────────────────────────────────
+
+app.get('/api/schedules', (_req, res) => res.json(loadSchedules()));
+
+app.post('/api/schedules', (req, res) => {
+  const { name, intervalMinutes, command, args, freePrompt, projectPath, allowPermissions, enabled } = req.body;
+  if (!name || !projectPath) return res.status(400).json({ error: 'name and projectPath are required' });
+  const schedule = {
+    id: `sched-${Date.now()}`,
+    name, intervalMinutes: intervalMinutes || 30,
+    command: command || '', args: args || '', freePrompt: freePrompt || '',
+    projectPath, allowPermissions: allowPermissions !== false,
+    enabled: enabled !== false,
+    createdAt: new Date().toISOString(), lastRun: null,
+    nextRun: new Date(Date.now() + (intervalMinutes || 30) * 60 * 1000).toISOString()
+  };
+  const list = loadSchedules();
+  list.push(schedule);
+  saveSchedules(list);
+  if (schedule.enabled) startScheduleTimer(schedule);
+  res.json(schedule);
+});
+
+app.put('/api/schedules/:id', (req, res) => {
+  const list = loadSchedules();
+  const idx = list.findIndex(s => s.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Schedule not found' });
+  list[idx] = { ...list[idx], ...req.body, id: req.params.id };
+  saveSchedules(list);
+  stopScheduleTimer(req.params.id);
+  if (list[idx].enabled) startScheduleTimer(list[idx]);
+  res.json(list[idx]);
+});
+
+app.delete('/api/schedules/:id', (req, res) => {
+  let list = loadSchedules();
+  if (!list.find(s => s.id === req.params.id)) return res.status(404).json({ error: 'Schedule not found' });
+  stopScheduleTimer(req.params.id);
+  saveSchedules(list.filter(s => s.id !== req.params.id));
+  res.json({ success: true });
+});
+
+app.get('/api/schedules/runs', (_req, res) => res.json(scheduleRunsStore));
+
+app.post('/api/schedules/runs/:execId/input', (req, res) => {
+  const proc = scheduleProcs.get(req.params.execId);
+  if (!proc) return res.status(404).json({ error: 'Run not found or already finished' });
+  const { message } = req.body;
+  if (typeof message !== 'string') return res.status(400).json({ error: 'message required' });
+  try {
+    proc.stdin.write(message + '\n');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/schedules/runs/:execId', (req, res) => {
+  const run = scheduleRunsStore.find(r => r.execId === req.params.execId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const proc = scheduleProcs.get(req.params.execId);
+  if (proc) { proc.kill(); scheduleProcs.delete(req.params.execId); }
+  if (run.status === 'running') {
+    run.status = 'killed';
+    run.endTime = new Date().toISOString();
+    run.output.push({ type: 'meta', message: '⚠ Process killed by user' });
+  }
+  saveScheduleRuns();
+  res.json({ success: true });
+});
+
+app.post('/api/schedules/:id/run', (req, res) => {
+  const schedule = loadSchedules().find(s => s.id === req.params.id);
+  if (!schedule) return res.status(404).json({ error: 'Schedule not found' });
+  const prompt = buildSchedulePrompt(schedule);
+  if (!prompt) return res.status(400).json({ error: 'Schedule has no command or prompt configured' });
+  if (!schedule.projectPath?.startsWith(os.homedir())) {
+    return res.status(400).json({ error: 'Project path is not configured or invalid' });
+  }
+  const execId = triggerSchedule(schedule);
+  res.json({ success: true, execId });
 });
 
 // Serve built client
@@ -617,5 +1583,5 @@ app.get('*', (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n  Claude Manager → http://localhost:${PORT}\n`);
+  console.log(`\n  Claude Flightdeck → http://localhost:${PORT}\n`);
 });

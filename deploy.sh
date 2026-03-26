@@ -2,7 +2,7 @@
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP="claude-manager"
+APP="claude-flightdeck"
 PORT=3001
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -34,13 +34,13 @@ deploy)
   ok "Client deps ready"
 
   log "Building client…"
-  (cd "$DIR/client" && npm run build -- --silent 2>&1 | grep -E 'built|error|warn' || true)
+  (cd "$DIR/client" && npm run build 2>&1)
   ok "Client built → client/dist/"
 
-  # 3. Start/reload via pm2
+  # 3. Start/restart via pm2
   if pm2 describe "$APP" &>/dev/null; then
-    log "Reloading existing pm2 process…"
-    pm2 reload "$DIR/ecosystem.config.cjs" --update-env
+    log "Restarting existing pm2 process…"
+    pm2 restart "$DIR/ecosystem.config.cjs" --update-env
   else
     log "Starting with pm2…"
     pm2 start "$DIR/ecosystem.config.cjs"

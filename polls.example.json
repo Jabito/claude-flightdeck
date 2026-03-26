@@ -1,0 +1,14 @@
+[
+  {
+    "id": "example-poll-1",
+    "name": "New unassigned tickets",
+    "enabled": false,
+    "intervalMinutes": 30,
+    "jqlFilter": "project = MYPROJ AND status = \"Open\" AND assignee is EMPTY ORDER BY created DESC",
+    "maxPerRun": 5,
+    "command": "dev:plan",
+    "projectPath": "/path/to/your/project",
+    "argTemplate": "{{key}} target=\"https://your-confluence/spaces/SPACE/pages/PAGE_ID\"",
+    "allowPermissions": true
+  }
+]

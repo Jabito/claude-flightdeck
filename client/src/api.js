@@ -75,13 +75,16 @@ export async function getCommands() {
   return r.json();
 }
 
-export function runClaude(projectPath, prompt, allowPermissions, onData) {
-  return fetch(`${BASE}/run-claude`, {
+export function runClaude(projectPath, prompt, allowPermissions, runId, onData, files = [], command = '', args = '') {
+  let cancel = () => {};
+
+  const promise = fetch(`${BASE}/run-claude`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectPath, prompt, allowPermissions })
+    body: JSON.stringify({ projectPath, prompt, allowPermissions, runId, files, command, args })
   }).then(response => {
     const reader = response.body.getReader();
+    cancel = () => reader.cancel();
     const decoder = new TextDecoder();
     let buffer = '';
 
@@ -100,8 +103,149 @@ export function runClaude(projectPath, prompt, allowPermissions, onData) {
           }
         });
         return pump();
-      });
+      }).catch(() => {}); // swallow cancellation errors
     }
     return pump();
   });
+
+  return { promise, cancel: () => cancel() };
+}
+
+export async function getCommandRuns() {
+  const r = await fetch(`${BASE}/command-runs`);
+  return r.json();
+}
+
+export async function clearCommandRuns() {
+  const r = await fetch(`${BASE}/command-runs`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function sendRunInput(runId, message) {
+  const r = await fetch(`${BASE}/run-claude/${runId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+  return r.json();
+}
+
+export async function sendWebhookRunInput(execId, message) {
+  const r = await fetch(`${BASE}/webhooks/runs/${execId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+  return r.json();
+}
+
+export async function sendPollRunInput(execId, message) {
+  const r = await fetch(`${BASE}/polls/runs/${execId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+  return r.json();
+}
+
+export async function sendScheduleRunInput(execId, message) {
+  const r = await fetch(`${BASE}/schedules/runs/${execId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+  return r.json();
+}
+
+export async function killWebhookRun(execId) {
+  const r = await fetch(`${BASE}/webhooks/runs/${execId}`, { method: 'DELETE' });
+  return r.json();
+}
+
+// ── Poll API
+export async function getPolls() {
+  const r = await fetch(`${BASE}/polls`);
+  return r.json();
+}
+
+export async function createPoll(data) {
+  const r = await fetch(`${BASE}/polls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+export async function updatePoll(id, data) {
+  const r = await fetch(`${BASE}/polls/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+export async function deletePoll(id) {
+  const r = await fetch(`${BASE}/polls/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function testPoll(id) {
+  const r = await fetch(`${BASE}/polls/${id}/test`, { method: 'POST' });
+  return r.json();
+}
+
+export async function getPollRuns() {
+  const r = await fetch(`${BASE}/polls/runs`);
+  return r.json();
+}
+
+export async function killPollRun(execId) {
+  const r = await fetch(`${BASE}/polls/runs/${execId}`, { method: 'DELETE' });
+  return r.json();
+}
+
+// ── Schedule API
+export async function getSchedules() {
+  const r = await fetch(`${BASE}/schedules`);
+  return r.json();
+}
+
+export async function createSchedule(data) {
+  const r = await fetch(`${BASE}/schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+export async function updateSchedule(id, data) {
+  const r = await fetch(`${BASE}/schedules/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+export async function deleteSchedule(id) {
+  const r = await fetch(`${BASE}/schedules/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function runScheduleNow(id) {
+  const r = await fetch(`${BASE}/schedules/${id}/run`, { method: 'POST' });
+  return r.json();
+}
+
+export async function getScheduleRuns() {
+  const r = await fetch(`${BASE}/schedules/runs`);
+  return r.json();
+}
+
+export async function killScheduleRun(execId) {
+  const r = await fetch(`${BASE}/schedules/runs/${execId}`, { method: 'DELETE' });
+  return r.json();
 }

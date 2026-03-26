@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'claude-manager',
+      name: 'claude-flightdeck',
       script: 'server.js',
       cwd: __dirname,
       instances: 1,
@@ -12,8 +12,8 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 3001
       },
-      error_file: '~/.pm2/logs/claude-manager-error.log',
-      out_file: '~/.pm2/logs/claude-manager-out.log',
+      error_file: '~/.pm2/logs/claude-flightdeck-error.log',
+      out_file: '~/.pm2/logs/claude-flightdeck-out.log',
       time: true
     }
   ]

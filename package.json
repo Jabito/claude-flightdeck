@@ -1,7 +1,7 @@
 {
-  "name": "claude-manager",
+  "name": "claude-flightdeck",
   "version": "1.0.0",
-  "description": "Visual manager for Claude Code files",
+  "description": "Claude Flightdeck — visual control panel for Claude Code: file explorer, agent runner, webhooks, polls, and schedules",
   "main": "server.js",
   "scripts": {
     "dev": "concurrently \"nodemon server.js\" \"cd client && npm run dev\"",

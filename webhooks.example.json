@@ -1,0 +1,14 @@
+[
+  {
+    "id": "example-webhook-1",
+    "name": "Create Technical Plan",
+    "triggerKey": "create-plan",
+    "command": "dev:plan",
+    "projectPath": "/path/to/your/project",
+    "argTemplate": "{{jira-ticket}} target=\"{{plan-target}}\"",
+    "secret": "",
+    "allowPermissions": true,
+    "enabled": false,
+    "defaultPayload": "{\n  \"jira-ticket\": \"{TICKET-ID or URL}\",\n  \"plan-target\": \"{Confluence page URL}\"\n}"
+  }
+]

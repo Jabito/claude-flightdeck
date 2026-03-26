@@ -1,3 +1,14 @@
 node_modules/
 client/node_modules/
 client/dist/
+
+# Runtime data — local to each user, not for repo
+command-runs.json
+poll-runs.json
+schedule-runs.json
+webhook-runs.json
+
+# Personal configuration — each user maintains their own
+polls.json
+webhooks.json
+schedules.json
