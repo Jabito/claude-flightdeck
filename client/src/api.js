@@ -121,6 +121,11 @@ export async function clearCommandRuns() {
   return r.json();
 }
 
+export async function deleteCommandRun(id) {
+  const r = await fetch(`${BASE}/command-runs/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+
 export async function sendRunInput(runId, message) {
   const r = await fetch(`${BASE}/run-claude/${runId}/input`, {
     method: 'POST',
@@ -159,6 +164,21 @@ export async function sendScheduleRunInput(execId, message) {
 
 export async function killWebhookRun(execId) {
   const r = await fetch(`${BASE}/webhooks/runs/${execId}`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function removeWebhookRun(execId) {
+  const r = await fetch(`${BASE}/webhooks/runs/${execId}/remove`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function removePollRun(execId) {
+  const r = await fetch(`${BASE}/polls/runs/${execId}/remove`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function removeScheduleRun(execId) {
+  const r = await fetch(`${BASE}/schedules/runs/${execId}/remove`, { method: 'DELETE' });
   return r.json();
 }
 

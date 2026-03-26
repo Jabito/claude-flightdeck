@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { killWebhookRun, killPollRun, killScheduleRun, sendWebhookRunInput, sendPollRunInput, sendScheduleRunInput } from '../api.js';
+import { killWebhookRun, killPollRun, killScheduleRun, sendWebhookRunInput, sendPollRunInput, sendScheduleRunInput, removeWebhookRun, removePollRun, removeScheduleRun } from '../api.js';
 
 const URL_REGEX = /(https?:\/\/[^\s\])"'>]+)/g;
 function renderWithLinks(text) {
@@ -44,6 +44,7 @@ async function fetchAllRuns() {
 export default function AutomationRunsPanel() {
   const [runs, setRuns] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [hoveredId, setHoveredId] = useState(null);
   const [filter, setFilter] = useState('all');
   const [now, setNow] = useState(Date.now());
   const [inputMsg, setInputMsg] = useState('');
@@ -90,7 +91,8 @@ export default function AutomationRunsPanel() {
   useEffect(() => {
     const waiting = runs.find(r =>
       r.status === 'running' && r.allowPermissions === false &&
-      r.output?.slice(-1)[0]?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i)
+      (r.output?.slice(-1)[0]?.type === 'ask_user' ||
+       r.output?.slice(-1)[0]?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i))
     );
     if (waiting) setSelectedId(waiting.execId);
   }, [runs]);
@@ -115,6 +117,20 @@ export default function AutomationRunsPanel() {
     else if (run.source === 'schedule') await killScheduleRun(run.execId);
     else await killWebhookRun(run.execId);
     loadRuns();
+  };
+
+  const handleDeleteRun = (e, run) => {
+    e.stopPropagation();
+    if (selectedId === run.execId) {
+      const idx = filtered.findIndex(r => r.execId === run.execId);
+      const next = filtered[idx + 1] ?? filtered[idx - 1];
+      setSelectedId(next?.execId ?? null);
+    }
+    setRuns(prev => prev.filter(r => r.execId !== run.execId));
+    const removeFn = run.source === 'poll' ? removePollRun
+      : run.source === 'schedule' ? removeScheduleRun
+      : removeWebhookRun;
+    removeFn(run.execId).catch(() => {});
   };
 
   const handleSendInput = async (quickMsg) => {
@@ -181,15 +197,18 @@ export default function AutomationRunsPanel() {
             const sColor = statusColor(run.status);
             const lastLine = run.output?.[run.output.length - 1];
             const waitingForInput = run.status === 'running' && run.allowPermissions === false
-              && lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i);
+              && (lastLine?.type === 'ask_user' || lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i));
             return (
               <div
                 key={run.execId}
                 onClick={() => setSelectedId(run.execId)}
+                onMouseEnter={() => setHoveredId(run.execId)}
+                onMouseLeave={() => setHoveredId(null)}
                 style={{
                   padding: '9px 12px', cursor: 'pointer', borderBottom: '1px solid #21262d',
                   background: isSelected ? '#1a2332' : 'transparent',
-                  borderLeft: `3px solid ${isSelected ? sColor : 'transparent'}`
+                  borderLeft: `3px solid ${isSelected ? sColor : 'transparent'}`,
+                  position: 'relative'
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
@@ -202,12 +221,26 @@ export default function AutomationRunsPanel() {
                   <span style={{ fontSize: 11, fontWeight: 600, color: '#e6edf3', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {runName(run)}
                   </span>
-                  <span style={{
-                    fontSize: 9, color: run.source === 'poll' ? '#d2a679' : run.source === 'schedule' ? '#a371f7' : '#8b949e',
-                    background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '1px 4px'
-                  }}>
-                    {run.source === 'poll' ? '⏱' : run.source === 'schedule' ? '⏰' : '⚡'}
-                  </span>
+                  {run.status !== 'running' && hoveredId === run.execId ? (
+                    <button
+                      onClick={e => handleDeleteRun(e, run)}
+                      title="Delete run"
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: '#8b949e', fontSize: 13, lineHeight: 1, padding: '0 2px',
+                        flexShrink: 0
+                      }}
+                    >
+                      ×
+                    </button>
+                  ) : (
+                    <span style={{
+                      fontSize: 9, color: run.source === 'poll' ? '#d2a679' : run.source === 'schedule' ? '#a371f7' : '#8b949e',
+                      background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '1px 4px', flexShrink: 0
+                    }}>
+                      {run.source === 'poll' ? '⏱' : run.source === 'schedule' ? '⏰' : '⚡'}
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: 10, fontFamily: 'monospace', color: '#79c0ff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
                   {run.prompt}
@@ -287,6 +320,19 @@ export default function AutomationRunsPanel() {
               style={{ flex: 1, overflow: 'auto', padding: '10px 14px', fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace", fontSize: 12, lineHeight: 1.6 }}
             >
               {selected.output.map((line, i) => {
+                if (line.type === 'ask_user') return (
+                  <div key={i} style={{ margin: '6px 0', padding: '8px 12px', borderRadius: 4, background: '#161b22', border: '1px solid #f0883e' }}>
+                    <div style={{ color: '#f0883e', fontWeight: 600, fontSize: 11, marginBottom: 4 }}>⏸ Claude is asking:</div>
+                    <div style={{ color: '#e6edf3' }}>{line.message}</div>
+                    {line.options?.length > 0 && (
+                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {line.options.map((opt, oi) => (
+                          <span key={oi} style={{ fontSize: 10, color: '#79c0ff', background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '2px 8px' }}>{opt}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
                 if (line.type === 'tool') return (
                   <div key={i} style={{ margin: '4px 0', padding: '4px 8px', borderRadius: 4, background: '#161b22', border: '1px solid #30363d' }}>
                     <span style={{ color: '#d2a679', fontWeight: 600 }}>{line.message}</span>
@@ -315,19 +361,25 @@ export default function AutomationRunsPanel() {
                 display: 'flex', gap: 8, alignItems: 'center'
               }}>
                 <span style={{ fontSize: 10, color: '#8b949e', whiteSpace: 'nowrap' }}>Reply:</span>
-                {['y', 'n'].map(q => (
-                  <button
-                    key={q}
-                    onClick={() => handleSendInput(q)}
-                    style={{
-                      background: '#0d1117', color: '#e6edf3',
-                      border: '1px solid #30363d', borderRadius: 4,
-                      padding: '3px 10px', fontSize: 11, cursor: 'pointer'
-                    }}
-                  >
-                    {q}
-                  </button>
-                ))}
+                {(() => {
+                  const lastLine = selected.output?.[selected.output.length - 1];
+                  const askOptions = lastLine?.type === 'ask_user' && lastLine.options?.length > 0
+                    ? lastLine.options
+                    : ['y', 'n'];
+                  return askOptions.map(q => (
+                    <button
+                      key={q}
+                      onClick={() => handleSendInput(q)}
+                      style={{
+                        background: '#0d1117', color: '#e6edf3',
+                        border: '1px solid #30363d', borderRadius: 4,
+                        padding: '3px 10px', fontSize: 11, cursor: 'pointer'
+                      }}
+                    >
+                      {q}
+                    </button>
+                  ));
+                })()}
                 <input
                   value={inputMsg}
                   onChange={e => setInputMsg(e.target.value)}

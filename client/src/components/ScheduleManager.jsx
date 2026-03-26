@@ -52,12 +52,19 @@ export default function ScheduleManager({ onViewRuns }) {
   const [runningId, setRunningId] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
 
+  const [, setTick] = useState(0);
+
   const load = () => getSchedules().then(setSchedules).catch(() => {});
 
   useEffect(() => {
     load();
     getProjects().then(setProjects).catch(() => {});
     getCommands().then(setCommands).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 1000);
+    return () => clearInterval(t);
   }, []);
 
   const openNew = () => { setForm(BLANK_FORM); setEditingId('new'); };

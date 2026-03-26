@@ -697,8 +697,12 @@ app.post('/api/run-claude', (req, res) => {
             if (block.type === 'text' && block.text) {
               send({ type: 'output', message: block.text });
             } else if (block.type === 'tool_use') {
-              const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
-              send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+              if (block.name === 'AskUserQuestion') {
+                send({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
+              } else {
+                const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
+                send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+              }
             }
           }
         } else if (event.type === 'user') {
@@ -753,6 +757,14 @@ app.get('/api/command-runs', (_req, res) => res.json(commandRunsStore));
 
 app.delete('/api/command-runs', (_req, res) => {
   commandRunsStore.length = 0;
+  saveCommandRuns();
+  res.json({ success: true });
+});
+
+app.delete('/api/command-runs/:id', (req, res) => {
+  const idx = commandRunsStore.findIndex(r => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  commandRunsStore.splice(idx, 1);
   saveCommandRuns();
   res.json({ success: true });
 });
@@ -824,7 +836,13 @@ function spawnWebhookProcess(run) {
         if (event.type === 'assistant') {
           for (const block of event.message?.content ?? []) {
             if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
-            else if (block.type === 'tool_use') run.output.push({ type: 'tool', message: `⚙ ${block.name}` });
+            else if (block.type === 'tool_use') {
+              if (block.name === 'AskUserQuestion') {
+                run.output.push({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
+              } else {
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}` });
+              }
+            }
           }
         } else if (event.type === 'result' && event.is_error) {
           run.output.push({ type: 'error', message: event.result ?? 'Unknown error' });
@@ -959,6 +977,14 @@ app.delete('/api/webhooks/runs/:execId', (req, res) => {
     run.output.push({ type: 'meta', message: '⚠ Process killed by user' });
   }
 
+  saveWebhookRuns();
+  res.json({ success: true });
+});
+
+app.delete('/api/webhooks/runs/:execId/remove', (req, res) => {
+  const idx = webhookRunsStore.findIndex(r => r.execId === req.params.execId);
+  if (idx === -1) return res.status(404).json({ error: 'Run not found' });
+  webhookRunsStore.splice(idx, 1);
   saveWebhookRuns();
   res.json({ success: true });
 });
@@ -1103,8 +1129,12 @@ function spawnPollProcess(run) {
           for (const block of event.message?.content ?? []) {
             if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
             else if (block.type === 'tool_use') {
-              const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
-              run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+              if (block.name === 'AskUserQuestion') {
+                run.output.push({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
+              } else {
+                const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+              }
             }
           }
         } else if (event.type === 'user') {
@@ -1190,6 +1220,7 @@ async function runPollCheck(pollConfig) {
   const idx = polls.findIndex(p => p.id === pollConfig.id);
   if (idx >= 0) {
     polls[idx].lastRun = new Date().toISOString();
+    polls[idx].nextRun = new Date(Date.now() + Math.max(5, pollConfig.intervalMinutes || 30) * 60_000).toISOString();
     savePolls(polls);
   }
 
@@ -1294,6 +1325,14 @@ app.delete('/api/polls/runs/:execId', (req, res) => {
   res.json({ success: true });
 });
 
+app.delete('/api/polls/runs/:execId/remove', (req, res) => {
+  const idx = pollRunsStore.findIndex(r => r.execId === req.params.execId);
+  if (idx === -1) return res.status(404).json({ error: 'Run not found' });
+  pollRunsStore.splice(idx, 1);
+  savePollRuns();
+  res.json({ success: true });
+});
+
 // Test: query JIRA and fire for all matching issues (bypasses dedup)
 app.post('/api/polls/:id/test', async (req, res) => {
   const config = loadPolls().find(p => p.id === req.params.id);
@@ -1389,8 +1428,12 @@ function spawnScheduleProcess(run) {
           for (const block of event.message?.content ?? []) {
             if (block.type === 'text' && block.text) run.output.push({ type: 'output', message: block.text });
             else if (block.type === 'tool_use') {
-              const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
-              run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+              if (block.name === 'AskUserQuestion') {
+                run.output.push({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
+              } else {
+                const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+              }
             }
           }
         } else if (event.type === 'user') {
@@ -1560,6 +1603,14 @@ app.delete('/api/schedules/runs/:execId', (req, res) => {
     run.endTime = new Date().toISOString();
     run.output.push({ type: 'meta', message: '⚠ Process killed by user' });
   }
+  saveScheduleRuns();
+  res.json({ success: true });
+});
+
+app.delete('/api/schedules/runs/:execId/remove', (req, res) => {
+  const idx = scheduleRunsStore.findIndex(r => r.execId === req.params.execId);
+  if (idx === -1) return res.status(404).json({ error: 'Run not found' });
+  scheduleRunsStore.splice(idx, 1);
   saveScheduleRuns();
   res.json({ success: true });
 });

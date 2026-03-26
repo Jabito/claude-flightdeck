@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { sendRunInput, clearCommandRuns } from '../api.js';
+import { sendRunInput, clearCommandRuns, deleteCommandRun } from '../api.js';
 
 const URL_REGEX = /(https?:\/\/[^\s\])"'>]+)/g;
 function renderWithLinks(text) {
@@ -38,6 +38,7 @@ function lineElapsed(ms) {
 
 export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, onReRun }) {
   const [selectedId, setSelectedId] = useState(null);
+  const [hoveredId, setHoveredId] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const outputRef = useRef(null);
@@ -64,7 +65,8 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
   useEffect(() => {
     const waiting = runs.find(r =>
       r.status === 'running' && r.allowPermissions === false &&
-      r.output?.slice(-1)[0]?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i)
+      (r.output?.slice(-1)[0]?.type === 'ask_user' ||
+       r.output?.slice(-1)[0]?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i))
     );
     if (waiting) setSelectedId(waiting.id);
   }, [runs]);
@@ -89,6 +91,17 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
     } catch (e) {
       appendRunOutput(selected.id, { type: 'error', message: `Failed to send input: ${e.message}` });
     }
+  };
+
+  const handleDeleteRun = (e, id) => {
+    e.stopPropagation();
+    if (selectedId === id) {
+      const idx = runs.findIndex(r => r.id === id);
+      const next = runs[idx + 1] ?? runs[idx - 1];
+      setSelectedId(next?.id ?? null);
+    }
+    setRuns(prev => prev.filter(r => r.id !== id));
+    deleteCommandRun(id).catch(() => {});
   };
 
   const statusColor = (s) => s === 'running' ? '#f0883e' : s === 'done' ? '#3fb950' : s === 'killed' ? '#8b949e' : '#f85149';
@@ -123,15 +136,18 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
             const sColor = statusColor(run.status);
             const lastLine = run.output?.[run.output.length - 1];
             const waitingForInput = run.status === 'running' && run.allowPermissions === false
-              && lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i);
+              && (lastLine?.type === 'ask_user' || lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i));
             return (
               <div
                 key={run.id}
                 onClick={() => setSelectedId(run.id)}
+                onMouseEnter={() => setHoveredId(run.id)}
+                onMouseLeave={() => setHoveredId(null)}
                 style={{
                   padding: '9px 12px', cursor: 'pointer', borderBottom: '1px solid #21262d',
                   background: isSelected ? '#1a2332' : 'transparent',
-                  borderLeft: `3px solid ${isSelected ? sColor : 'transparent'}`
+                  borderLeft: `3px solid ${isSelected ? sColor : 'transparent'}`,
+                  position: 'relative'
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
@@ -144,6 +160,19 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                   <span style={{ fontSize: 11, fontWeight: 600, color: '#e6edf3', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {run.label}
                   </span>
+                  {run.status !== 'running' && hoveredId === run.id && (
+                    <button
+                      onClick={e => handleDeleteRun(e, run.id)}
+                      title="Delete run"
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: '#8b949e', fontSize: 13, lineHeight: 1, padding: '0 2px',
+                        flexShrink: 0
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: 8, fontSize: 10, color: '#8b949e' }}>
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{run.projectName}</span>
@@ -214,6 +243,22 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                   : null;
                 const tsEl = ts ? <span style={{ color: '#484f58', fontSize: 10, flexShrink: 0, marginLeft: 12, alignSelf: 'flex-start', paddingTop: 2 }}>{ts}</span> : null;
 
+                if (line.type === 'ask_user') return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', margin: '6px 0' }}>
+                    <div style={{ flex: 1, padding: '8px 12px', borderRadius: 4, background: '#161b22', border: '1px solid #f0883e' }}>
+                      <div style={{ color: '#f0883e', fontWeight: 600, fontSize: 11, marginBottom: 4 }}>⏸ Claude is asking:</div>
+                      <div style={{ color: '#e6edf3' }}>{line.message}</div>
+                      {line.options?.length > 0 && (
+                        <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {line.options.map((opt, oi) => (
+                            <span key={oi} style={{ fontSize: 10, color: '#79c0ff', background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '2px 8px' }}>{opt}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {tsEl}
+                  </div>
+                );
                 if (line.type === 'tool') return (
                   <div key={i} style={{ display: 'flex', alignItems: 'flex-start', margin: '4px 0' }}>
                     <div style={{ flex: 1, padding: '4px 8px', borderRadius: 4, background: '#161b22', border: '1px solid #30363d' }}>
@@ -256,22 +301,28 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
               <div style={{
                 padding: '8px 14px', borderTop: '1px solid #30363d',
                 background: '#161b22', flexShrink: 0,
-                display: 'flex', gap: 8, alignItems: 'center'
+                display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap'
               }}>
                 <span style={{ fontSize: 10, color: '#8b949e', whiteSpace: 'nowrap' }}>Reply:</span>
-                {['y', 'n'].map(q => (
-                  <button
-                    key={q}
-                    onClick={() => handleSendFeedback(q)}
-                    style={{
-                      background: '#0d1117', color: '#e6edf3',
-                      border: '1px solid #30363d', borderRadius: 4,
-                      padding: '3px 10px', fontSize: 11, cursor: 'pointer'
-                    }}
-                  >
-                    {q}
-                  </button>
-                ))}
+                {(() => {
+                  const lastLine = selected.output?.[selected.output.length - 1];
+                  const askOptions = lastLine?.type === 'ask_user' && lastLine.options?.length > 0
+                    ? lastLine.options
+                    : ['y', 'n'];
+                  return askOptions.map(q => (
+                    <button
+                      key={q}
+                      onClick={() => handleSendFeedback(q)}
+                      style={{
+                        background: '#0d1117', color: '#e6edf3',
+                        border: '1px solid #30363d', borderRadius: 4,
+                        padding: '3px 10px', fontSize: 11, cursor: 'pointer'
+                      }}
+                    >
+                      {q}
+                    </button>
+                  ));
+                })()}
                 <input
                   value={feedbackMsg}
                   onChange={e => setFeedbackMsg(e.target.value)}

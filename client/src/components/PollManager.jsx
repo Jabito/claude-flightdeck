@@ -25,6 +25,7 @@ export default function PollManager({ onViewRuns }) {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState(null);
   const [testMsg, setTestMsg] = useState('');
+  const [, setTick] = useState(0);
 
   const load = () => getPolls().then(setPolls).catch(() => {});
 
@@ -32,6 +33,11 @@ export default function PollManager({ onViewRuns }) {
     load();
     getProjects().then(setProjects).catch(() => {});
     getCommands().then(setCommands).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 1000);
+    return () => clearInterval(t);
   }, []);
 
   const openNew = () => { setForm(BLANK_FORM); setEditingId('new'); };
@@ -103,6 +109,16 @@ export default function PollManager({ onViewRuns }) {
     if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
     if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
     return `${Math.floor(ms / 86400000)}d ago`;
+  }
+
+  function timeUntil(isoString) {
+    if (!isoString) return '—';
+    const ms = new Date(isoString).getTime() - Date.now();
+    if (ms <= 0) return 'now';
+    if (ms < 60000) return `in ${Math.round(ms / 1000)}s`;
+    if (ms < 3600000) return `in ${Math.floor(ms / 60000)}m`;
+    if (ms < 86400000) return `in ${Math.floor(ms / 3600000)}h`;
+    return `in ${Math.floor(ms / 86400000)}d`;
   }
 
   return (
@@ -276,7 +292,10 @@ export default function PollManager({ onViewRuns }) {
                   {poll.projectPath?.split('/').pop()}
                 </span>
                 <span style={{ color: '#484f58' }}>max {poll.maxPerRun || 5}/run</span>
-                <span style={{ marginLeft: 'auto', color: '#484f58' }}>last: {timeAgo(poll.lastRun)}</span>
+                <span style={{ color: '#484f58' }}>last: {timeAgo(poll.lastRun)}</span>
+                <span style={{ marginLeft: 'auto', color: poll.enabled !== false ? '#8b949e' : '#484f58' }}>
+                  next: {poll.enabled !== false ? timeUntil(poll.nextRun) : 'paused'}
+                </span>
               </div>
 
               <div style={{ borderTop: '1px solid #21262d', paddingTop: 8 }}>
