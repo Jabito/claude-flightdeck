@@ -5,10 +5,10 @@ import FileEditor from './components/FileEditor.jsx';
 import ClaudeRunner from './components/ClaudeRunner.jsx';
 import RunsPanel from './components/RunsPanel.jsx';
 import WebhookManager from './components/WebhookManager.jsx';
-import PollManager from './components/PollManager.jsx';
 import ScheduleManager from './components/ScheduleManager.jsx';
 import AutomationRunsPanel from './components/AutomationRunsPanel.jsx';
-import { getFileTree, getRelationships, saveFile, moveFile, getFile, getCommandRuns } from './api.js';
+import ProjectsManager from './components/ProjectsManager.jsx';
+import { getFileTree, getRelationships, saveFile, moveFile, getFile, getCommandRuns, streamRun } from './api.js';
 
 function NavItem({ icon, label, active, badge, onClick }) {
   return (
@@ -76,7 +76,24 @@ export default function App() {
     loadTree();
     loadRelationships();
     getCommandRuns().then(history => {
-      if (history?.length) setRuns(history);
+      if (!history?.length) return;
+      setRuns(history);
+      // Reconnect to any processes that were still running before the page loaded
+      history.filter(r => r.status === 'running').forEach(run => {
+        const { cancel } = streamRun(run.id, (data) => {
+          if (data.type === 'done') {
+            updateRun(run.id, {
+              status: data.code === 0 ? 'done' : 'error',
+              exitCode: data.code,
+              endTime: new Date().toISOString(),
+              cancel: null,
+            });
+          } else {
+            appendRunOutput(run.id, { ...data, receivedAt: Date.now() });
+          }
+        });
+        updateRun(run.id, { cancel });
+      });
     }).catch(() => {});
   }, []);
 
@@ -320,9 +337,10 @@ export default function App() {
               />
               <NavDivider />
               <NavItem icon="⚡" label="Webhooks" active={executeTab === 'webhooks'} onClick={() => setExecuteTab('webhooks')} />
-              <NavItem icon="⏱" label="Polls" active={executeTab === 'polls'} onClick={() => setExecuteTab('polls')} />
-              <NavItem icon="⏰" label="Schedules" active={executeTab === 'schedules'} onClick={() => setExecuteTab('schedules')} />
-              <NavItem icon="⚙" label="Auto Runs" active={executeTab === 'autoRuns'} onClick={() => setExecuteTab('autoRuns')} />
+              <NavItem icon="⏰" label="Scheduled Jobs" active={executeTab === 'schedules'} onClick={() => setExecuteTab('schedules')} />
+              <NavItem icon="⚙" label="Triggered Events" active={executeTab === 'autoRuns'} onClick={() => setExecuteTab('autoRuns')} />
+              <NavDivider />
+              <NavItem icon="◫" label="Projects" active={executeTab === 'projects'} onClick={() => setExecuteTab('projects')} />
             </div>
 
             {/* Execute content */}
@@ -350,13 +368,11 @@ export default function App() {
               {executeTab === 'webhooks' && (
                 <WebhookManager onViewRuns={() => setExecuteTab('autoRuns')} />
               )}
-              {executeTab === 'polls' && (
-                <PollManager onViewRuns={() => setExecuteTab('autoRuns')} />
-              )}
               {executeTab === 'schedules' && (
                 <ScheduleManager onViewRuns={() => setExecuteTab('autoRuns')} />
               )}
               {executeTab === 'autoRuns' && <AutomationRunsPanel />}
+              {executeTab === 'projects' && <ProjectsManager />}
             </div>
           </>
         )}
