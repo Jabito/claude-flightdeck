@@ -178,7 +178,20 @@ export default function WebhookManager({ onViewRuns }) {
                 <input style={{ ...inputStyle, marginTop: 4 }} value={form.projectPath} onChange={e => setForm(f => ({ ...f, projectPath: e.target.value }))} placeholder="or enter path manually…" />
               </Field>
 
-              <Field label="Arg Template" hint="e.g. {{issue.key}} — resolved against webhook payload">
+              <Field label="Arg Template" hint="resolved against webhook payload" tip={[
+                'Reference any field in the POST JSON body using dot-notation wrapped in {{ }}.',
+                '',
+                '#Examples:',
+                '• {{issue.key}}',
+                '• {{issue.fields.summary}}',
+                '• {{user.name}}',
+                '',
+                '#Multiple tokens are allowed:',
+                '• {{issue.key}} target="{{url}}"',
+                '',
+                '#The resolved string is passed as arguments to the command:',
+                '• /dev:implement {{issue.key}}',
+              ]}>
                 <input style={inputStyle} value={form.argTemplate} onChange={e => setForm(f => ({ ...f, argTemplate: e.target.value }))} placeholder="{{issue.key}}" />
                 {form.argTemplate && form.command && (
                   <div style={{ fontSize: 10, color: '#8b949e', marginTop: 3, fontFamily: 'monospace' }}>
@@ -191,7 +204,21 @@ export default function WebhookManager({ onViewRuns }) {
                 <input style={inputStyle} value={form.secret} onChange={e => setForm(f => ({ ...f, secret: e.target.value }))} placeholder="Leave blank to disable auth" type="password" />
               </Field>
 
-              <Field label="Default Test Payload" hint="Pre-fills the test payload textarea">
+              <Field label="Default Test Payload" hint="pre-fills the test payload textarea" tip={[
+                'JSON body sent when this webhook is triggered.',
+                'Use nested objects to match the structure your Arg Template references.',
+                '',
+                '#Example:',
+                '• {',
+                '•   "issue": {',
+                '•     "key": "PROJ-123",',
+                '•     "fields": {',
+                '•       "summary": "Fix login bug"',
+                '•     }',
+                '•   },',
+                '•   "user": { "name": "alice" }',
+                '• }',
+              ]}>
                 <textarea style={{ ...inputStyle, resize: 'vertical', minHeight: 50, fontFamily: 'monospace', fontSize: 11 }} value={form.defaultPayload} onChange={e => setForm(f => ({ ...f, defaultPayload: e.target.value }))} placeholder='{"issue":{"key":"PROJ-123"}}' />
               </Field>
 
@@ -237,7 +264,16 @@ export default function WebhookManager({ onViewRuns }) {
 
               {/* Test section */}
               <div style={{ borderTop: '1px solid #21262d', paddingTop: 8 }}>
-                <div style={{ fontSize: 10, color: '#8b949e', marginBottom: 4 }}>Test payload (JSON)</div>
+                <div style={{ fontSize: 10, color: '#8b949e', marginBottom: 4, display: 'flex', alignItems: 'center' }}>
+                  Test payload (JSON)
+                  <InfoTip lines={[
+                    'JSON body passed to this webhook on Fire Test.',
+                    'Must match the structure your Arg Template references.',
+                    '',
+                    '#Example for {{issue.key}}:',
+                    '• { "issue": { "key": "PROJ-123" } }',
+                  ]} />
+                </div>
                 <textarea
                   value={getPayload(wh)}
                   onChange={e => setPayload(wh, e.target.value)}
@@ -260,11 +296,49 @@ export default function WebhookManager({ onViewRuns }) {
   );
 }
 
-function Field({ label, hint, children }) {
+function InfoTip({ lines }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-block', marginLeft: 6 }}>
+      <span
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 14, height: 14, borderRadius: '50%', fontSize: 9, fontWeight: 700,
+          background: '#21262d', color: '#8b949e', border: '1px solid #30363d',
+          cursor: 'default', userSelect: 'none', lineHeight: 1,
+        }}
+      >?</span>
+      {open && (
+        <div style={{
+          position: 'absolute', left: 20, top: -4, zIndex: 100,
+          background: '#1c2128', border: '1px solid #30363d', borderRadius: 7,
+          padding: '10px 12px', width: 280, boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+        }}>
+          {lines.map((line, i) =>
+            line === '' ? <div key={i} style={{ height: 6 }} /> :
+            line.startsWith('•') ? (
+              <div key={i} style={{ fontSize: 10, color: '#c9d1d9', fontFamily: 'monospace', marginBottom: 3 }}>{line}</div>
+            ) : (
+              <div key={i} style={{ fontSize: 10, color: line.startsWith('#') ? '#8b949e' : '#e6edf3', fontWeight: line.startsWith('#') ? 400 : 500, marginBottom: 4 }}>
+                {line.startsWith('#') ? line.slice(1) : line}
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function Field({ label, hint, tip, children }) {
   return (
     <div>
-      <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
-        {label}{hint && <span style={{ color: '#484f58', marginLeft: 6 }}>— {hint}</span>}
+      <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4, display: 'flex', alignItems: 'center' }}>
+        <span>{label}</span>
+        {hint && <span style={{ color: '#484f58', marginLeft: 6 }}>— {hint}</span>}
+        {tip && <InfoTip lines={tip} />}
       </div>
       {children}
     </div>
