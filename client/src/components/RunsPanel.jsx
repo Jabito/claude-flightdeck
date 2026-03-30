@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { sendRunInput, clearCommandRuns, deleteCommandRun } from '../api.js';
+import { sendRunInput, clearCommandRuns, deleteCommandRun, killRun } from '../api.js';
 
 const URL_REGEX = /(https?:\/\/[^\s\])"'>]+)/g;
 function renderWithLinks(text) {
@@ -206,10 +206,11 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
               </span>
               <span style={{ fontSize: 10, color: '#484f58' }}>{selected.projectName}</span>
               <span style={{ fontSize: 10, color: '#484f58' }}>{elapsed(selected.startTime, selected.endTime)}</span>
-              {selected.status === 'running' && selected.cancel && (
+              {selected.status === 'running' && (
                 <button
                   onClick={() => {
-                    selected.cancel();
+                    selected.cancel?.();
+                    killRun(selected.id).catch(() => {});
                     updateRun(selected.id, { status: 'killed', endTime: new Date().toISOString(), cancel: null });
                     appendRunOutput(selected.id, { type: 'meta', message: '⚠ Process killed by user' });
                   }}

@@ -70,6 +70,15 @@ export async function getProjects() {
   return r.json();
 }
 
+export async function deleteProject(projectPath) {
+  const r = await fetch(`${BASE}/projects`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath })
+  });
+  return r.json();
+}
+
 export async function getCommands() {
   const r = await fetch(`${BASE}/commands`);
   return r.json();
@@ -123,6 +132,38 @@ export async function clearCommandRuns() {
 
 export async function deleteCommandRun(id) {
   const r = await fetch(`${BASE}/command-runs/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+
+// Reconnect to an in-progress (or finished) run and replay its output
+export function streamRun(runId, onData) {
+  let cancel = () => {};
+  const promise = fetch(`${BASE}/run-claude/${runId}/stream`).then(response => {
+    const reader = response.body.getReader();
+    cancel = () => reader.cancel();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    function pump() {
+      return reader.read().then(({ done, value }) => {
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        lines.forEach(line => {
+          if (line.startsWith('data: ')) {
+            try { onData(JSON.parse(line.slice(6))); } catch {}
+          }
+        });
+        return pump();
+      }).catch(() => {});
+    }
+    return pump();
+  });
+  return { promise, cancel: () => cancel() };
+}
+
+export async function killRun(runId) {
+  const r = await fetch(`${BASE}/run-claude/${runId}`, { method: 'DELETE' });
   return r.json();
 }
 

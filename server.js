@@ -4,6 +4,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const os = require('os');
+const EventEmitter = require('events');
 
 const app = express();
 const PORT = 3001;
@@ -27,7 +28,7 @@ const SKIP_DIRS = new Set([
   'cache', 'session-env', 'sessions', 'shell-snapshots', 'telemetry',
   'image-cache', 'paste-cache', 'debug', 'backups', 'downloads',
   'file-history', 'tasks', 'teams', 'plans', 'history.jsonl',
-  'node_modules', '.git'
+  'node_modules', '.git', 'projects', 'todos'
 ]);
 
 app.use(express.json({ limit: '10mb' }));
@@ -579,6 +580,49 @@ app.get('/api/projects', (_req, res) => {
   res.json(projects);
 });
 
+// Clean-delete a project: remove associated webhooks, polls, schedules, and command runs
+app.delete('/api/projects', (req, res) => {
+  const { projectPath } = req.body;
+  if (!projectPath || typeof projectPath !== 'string') {
+    return res.status(400).json({ error: 'projectPath required' });
+  }
+
+  const removed = { webhooks: 0, polls: 0, schedules: 0, runs: 0 };
+
+  // Remove webhooks tied to this project
+  const webhooks = loadWebhooks();
+  const filteredWebhooks = webhooks.filter(w => w.projectPath !== projectPath);
+  removed.webhooks = webhooks.length - filteredWebhooks.length;
+  saveWebhooks(filteredWebhooks);
+
+  // Remove polls tied to this project
+  const polls = loadPolls();
+  const filteredPolls = polls.filter(p => p.projectPath !== projectPath);
+  removed.polls = polls.length - filteredPolls.length;
+  savePolls(filteredPolls);
+
+  // Remove schedules tied to this project
+  const schedules = loadSchedules();
+  const filteredSchedules = schedules.filter(s => s.projectPath !== projectPath);
+  removed.schedules = schedules.length - filteredSchedules.length;
+  saveSchedules(filteredSchedules);
+
+  // Remove command runs tied to this project
+  const before = commandRunsStore.length;
+  commandRunsStore.splice(0, commandRunsStore.length, ...commandRunsStore.filter(r => r.projectPath !== projectPath));
+  removed.runs = before - commandRunsStore.length;
+  saveCommandRuns();
+
+  // Delete the project directory from the filesystem
+  try {
+    fs.rmSync(projectPath, { recursive: true, force: true });
+  } catch (e) {
+    return res.status(500).json({ error: `Cleaned automation data but failed to delete folder: ${e.message}`, removed });
+  }
+
+  res.json({ ok: true, removed });
+});
+
 app.get('/api/commands', (_req, res) => {
   const commandsDir = path.join(CLAUDE_DIR, 'commands');
   const commands = [];
@@ -601,6 +645,8 @@ app.get('/api/commands', (_req, res) => {
 
 // runId → child process; allows sending stdin feedback to non-permissive runs
 const claudeProcs = new Map();
+// runId → EventEmitter; allows multiple SSE clients to subscribe to the same run
+const runEmitters = new Map();
 
 // ─── Command run persistence ──────────────────────────────────────────────────
 
@@ -666,12 +712,28 @@ app.post('/api/run-claude', (req, res) => {
   commandRunsStore.unshift(runRecord);
   if (commandRunsStore.length > MAX_COMMAND_RUNS) commandRunsStore.pop();
 
-  // send() streams to the SSE client AND records to the run store
+  // One emitter per run — decouples the process from any single SSE connection
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  runEmitters.set(recId, emitter);
+
+  // send() buffers output AND broadcasts to all subscribed SSE listeners
   const send = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
     if (data.type !== 'start') runRecord.output.push(data);
+    emitter.emit('data', data);
   };
-  send({ type: 'start', message: `Running in ${projectPath}` });
+
+  // Wire the initial SSE response to the emitter
+  const onInitialData = (data) => {
+    if (!res.writableEnded) {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+    }
+  };
+  emitter.on('data', onInitialData);
+
+  // Kick off with a start event (not buffered)
+  try { res.write(`data: ${JSON.stringify({ type: 'start', message: `Running in ${projectPath}` })}\n\n`); } catch {}
+
 
   const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
   if (allowPermissions) args.push('--dangerously-skip-permissions');
@@ -725,20 +787,78 @@ app.post('/api/run-claude', (req, res) => {
   });
   proc.stderr.on('data', d => send({ type: 'error', message: d.toString() }));
   proc.on('close', (code, signal) => {
+    claudeProcs.delete(recId);
     if (runId) claudeProcs.delete(runId);
     if (uploadDir) try { fs.rmSync(uploadDir, { recursive: true, force: true }); } catch {}
-    runRecord.status = code === 0 ? 'done' : 'error';
-    runRecord.exitCode = code;
-    runRecord.endTime = new Date().toISOString();
+    if (runRecord.status === 'running') {
+      runRecord.status = code === 0 ? 'done' : 'error';
+      runRecord.exitCode = code;
+      runRecord.endTime = new Date().toISOString();
+    }
     saveCommandRuns();
     send({ type: 'done', code, signal });
-    res.end();
+    runEmitters.delete(recId);
+    if (!res.writableEnded) try { res.end(); } catch {}
   });
   proc.on('error', err => { send({ type: 'error', message: `spawn error: ${err.message}` }); });
+  // SSE client disconnected — detach listener but keep process running
   res.on('close', () => {
-    if (runId) claudeProcs.delete(runId);
-    if (!res.writableEnded) proc.kill();
+    emitter.off('data', onInitialData);
   });
+});
+
+// Reconnect to a running (or completed) run — replays buffered output then streams live
+app.get('/api/run-claude/:runId/stream', (req, res) => {
+  const runRecord = commandRunsStore.find(r => r.id === req.params.runId);
+  if (!runRecord) return res.status(404).json({ error: 'Run not found' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Replay all buffered output
+  for (const data of runRecord.output) {
+    if (res.writableEnded) return;
+    try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { return; }
+  }
+
+  // If already finished, close immediately
+  if (runRecord.status !== 'running') {
+    try { res.end(); } catch {}
+    return;
+  }
+
+  // Subscribe to live events
+  const emitter = runEmitters.get(runRecord.id);
+  if (!emitter) { try { res.end(); } catch {} return; }
+
+  const onData = (data) => {
+    if (!res.writableEnded) {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+    }
+  };
+  emitter.on('data', onData);
+  res.on('close', () => emitter.off('data', onData));
+});
+
+// Explicitly kill a running process
+app.delete('/api/run-claude/:runId', (req, res) => {
+  const { runId } = req.params;
+  const proc = claudeProcs.get(runId);
+  if (proc) { proc.kill(); claudeProcs.delete(runId); }
+  const runRecord = commandRunsStore.find(r => r.id === runId);
+  if (runRecord && runRecord.status === 'running') {
+    runRecord.status = 'killed';
+    runRecord.endTime = new Date().toISOString();
+    saveCommandRuns();
+    const emitter = runEmitters.get(runId);
+    if (emitter) {
+      emitter.emit('data', { type: 'meta', message: '⚠ Process killed by user' });
+      runEmitters.delete(runId);
+    }
+  }
+  res.json({ success: true });
 });
 
 app.post('/api/run-claude/:runId/input', (req, res) => {
@@ -1049,6 +1169,7 @@ function savePollRuns() {
 const pollRunsStore = loadPollRuns(); // newest first
 const pollProcs = new Map(); // execId → child process
 const pollSeenKeys = new Map(); // pollId → Set<issueKey> (in-memory dedup per session)
+const bbSeenCommits = new Map(); // pollId → last seen commit hash
 
 function loadPolls() {
   try { return JSON.parse(fs.readFileSync(POLLS_FILE, 'utf8')); } catch { return []; }
@@ -1056,6 +1177,21 @@ function loadPolls() {
 
 function savePolls(polls) {
   fs.writeFileSync(POLLS_FILE, JSON.stringify(polls, null, 2));
+}
+
+function getBitbucketConfig() {
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
+    const bbConfig = settings.mcpServers?.bitbucket;
+    if (!bbConfig) return null;
+    const args = bbConfig.args || [];
+    const tokenIdx = args.indexOf('--bitbucket-token');
+    const wsIdx    = args.indexOf('--default-workspace');
+    const token     = tokenIdx >= 0 ? args[tokenIdx + 1] : null;
+    const workspace = wsIdx    >= 0 ? args[wsIdx    + 1] : null;
+    if (!token || !workspace) return null;
+    return { token, workspace };
+  } catch { return null; }
 }
 
 function getAtlassianConfig() {
@@ -1257,16 +1393,104 @@ async function runPollCheck(pollConfig) {
   }
 }
 
+async function runBitbucketCheck(pollConfig) {
+  const bbConfig = getBitbucketConfig();
+  if (!bbConfig) {
+    console.warn(`  ⚠ Bitbucket Poll "${pollConfig.name}": no Bitbucket config in settings.json`);
+    return;
+  }
+
+  const polls = loadPolls();
+  const idx = polls.findIndex(p => p.id === pollConfig.id);
+  if (idx >= 0) {
+    polls[idx].lastRun = new Date().toISOString();
+    polls[idx].nextRun = new Date(Date.now() + Math.max(5, pollConfig.intervalMinutes || 30) * 60_000).toISOString();
+    savePolls(polls);
+  }
+
+  try {
+    const workspace = pollConfig.bbWorkspace || bbConfig.workspace;
+    const repo = pollConfig.bbRepo;
+    const branch = pollConfig.bbBranch || 'main';
+
+    const resp = await fetch(
+      `https://api.bitbucket.org/2.0/repositories/${workspace}/${repo}/commits/${branch}?pagelen=1`,
+      { headers: { Authorization: `Bearer ${bbConfig.token}`, Accept: 'application/json' } }
+    );
+    if (!resp.ok) throw new Error(`Bitbucket API ${resp.status}: ${await resp.text().then(t => t.slice(0, 100))}`);
+
+    const data = await resp.json();
+    const latest = (data.values || [])[0];
+    if (!latest) return;
+
+    const hash = latest.hash;
+    const shortHash = hash.slice(0, 8);
+
+    if (!bbSeenCommits.has(pollConfig.id)) {
+      bbSeenCommits.set(pollConfig.id, hash);
+      console.log(`  ◑ Bitbucket Poll "${pollConfig.name}": baseline ${shortHash}, no trigger on first run`);
+      return;
+    }
+
+    if (bbSeenCommits.get(pollConfig.id) === hash) {
+      console.log(`  ◑ Bitbucket Poll "${pollConfig.name}": no new commits`);
+      return;
+    }
+
+    bbSeenCommits.set(pollConfig.id, hash);
+
+    const commitCtx = {
+      hash,
+      shortHash,
+      message: (latest.message || '').split('\n')[0].slice(0, 80),
+      author: latest.author?.user?.display_name || latest.author?.raw?.replace(/<[^>]*>/g, '').trim() || 'unknown',
+      branch,
+      repo,
+    };
+
+    if (!pollConfig.projectPath?.startsWith(os.homedir())) return;
+
+    const resolvedArgs = pollConfig.argTemplate
+      ? resolveTemplate(pollConfig.argTemplate, commitCtx).trim()
+      : shortHash;
+    const prompt = pollConfig.command
+      ? (resolvedArgs ? `/${pollConfig.command} ${resolvedArgs}` : `/${pollConfig.command}`)
+      : resolvedArgs;
+
+    const execId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const run = {
+      execId, source: 'poll',
+      pollId: pollConfig.id, pollName: pollConfig.name,
+      issueKey: shortHash, issueSummary: commitCtx.message,
+      command: pollConfig.command, projectPath: pollConfig.projectPath,
+      prompt, resolvedArgs,
+      status: 'running',
+      output: [{ type: 'meta', message: `Bitbucket Poll "${pollConfig.name}" — ${prompt}\n  commit: ${shortHash} — ${commitCtx.message}` }],
+      allowPermissions: pollConfig.allowPermissions ?? true,
+      startTime: new Date().toISOString(), endTime: null, exitCode: null,
+    };
+    addPollRun(run);
+    spawnPollProcess(run);
+    console.log(`  ⚡ Bitbucket Poll "${pollConfig.name}": triggered for ${shortHash}`);
+  } catch (e) {
+    console.error(`  ✗ Bitbucket Poll "${pollConfig.name}" error:`, e.message);
+  }
+}
+
 // Check polls every minute
 setInterval(() => {
   const now = Date.now();
   loadPolls()
-    .filter(p => p.enabled !== false && p.jqlFilter && p.command && p.projectPath)
+    .filter(p => p.enabled !== false && p.command && p.projectPath)
     .forEach(poll => {
       const intervalMs = Math.max(5, poll.intervalMinutes || 30) * 60_000;
       const nextRun = poll.lastRun ? new Date(poll.lastRun).getTime() + intervalMs : 0;
       if (now >= nextRun) {
-        runPollCheck(poll).catch(e => console.error('Poll error:', e.message));
+        if (poll.sourceType === 'bitbucket' && poll.bbRepo) {
+          runBitbucketCheck(poll).catch(e => console.error('Bitbucket poll error:', e.message));
+        } else if (poll.jqlFilter) {
+          runPollCheck(poll).catch(e => console.error('Poll error:', e.message));
+        }
       }
     });
 }, 60_000);
@@ -1294,6 +1518,7 @@ app.put('/api/polls/:id', (req, res) => {
 app.delete('/api/polls/:id', (req, res) => {
   savePolls(loadPolls().filter(p => p.id !== req.params.id));
   pollSeenKeys.delete(req.params.id);
+  bbSeenCommits.delete(req.params.id);
   res.json({ success: true });
 });
 
@@ -1334,13 +1559,66 @@ app.delete('/api/polls/runs/:execId/remove', (req, res) => {
   res.json({ success: true });
 });
 
-// Test: query JIRA and fire for all matching issues (bypasses dedup)
+// Test: query JIRA / Bitbucket and fire (bypasses dedup)
 app.post('/api/polls/:id/test', async (req, res) => {
   const config = loadPolls().find(p => p.id === req.params.id);
   if (!config) return res.status(404).json({ error: 'Poll not found' });
   if (!config.projectPath?.startsWith(os.homedir())) {
     return res.status(400).json({ error: 'Poll project path is not configured or invalid' });
   }
+
+  // Bitbucket test: fetch latest commit and fire once (bypasses seen-commit dedup)
+  if (config.sourceType === 'bitbucket') {
+    const bbConfig = getBitbucketConfig();
+    if (!bbConfig) return res.status(400).json({ error: 'No Bitbucket config found in settings.json' });
+    try {
+      const workspace = config.bbWorkspace || bbConfig.workspace;
+      const branch = config.bbBranch || 'main';
+      const resp = await fetch(
+        `https://api.bitbucket.org/2.0/repositories/${workspace}/${config.bbRepo}/commits/${branch}?pagelen=1`,
+        { headers: { Authorization: `Bearer ${bbConfig.token}`, Accept: 'application/json' } }
+      );
+      if (!resp.ok) throw new Error(`Bitbucket API ${resp.status}`);
+      const data = await resp.json();
+      const latest = (data.values || [])[0];
+      if (!latest) return res.json({ success: true, message: 'No commits found on branch', execIds: [] });
+
+      const commitCtx = {
+        hash: latest.hash,
+        shortHash: latest.hash.slice(0, 8),
+        message: (latest.message || '').split('\n')[0].slice(0, 80),
+        author: latest.author?.user?.display_name || latest.author?.raw?.replace(/<[^>]*>/g, '').trim() || 'unknown',
+        branch,
+        repo: config.bbRepo,
+      };
+      const resolvedArgs = config.argTemplate
+        ? resolveTemplate(config.argTemplate, commitCtx).trim()
+        : commitCtx.shortHash;
+      const prompt = config.command
+        ? (resolvedArgs ? `/${config.command} ${resolvedArgs}` : `/${config.command}`)
+        : resolvedArgs;
+
+      const execId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const run = {
+        execId, source: 'poll',
+        pollId: config.id, pollName: config.name,
+        issueKey: commitCtx.shortHash, issueSummary: commitCtx.message,
+        command: config.command, projectPath: config.projectPath,
+        prompt, resolvedArgs,
+        status: 'running',
+        output: [{ type: 'meta', message: `Test run — ${prompt}\n  commit: ${commitCtx.shortHash} — ${commitCtx.message}` }],
+        allowPermissions: config.allowPermissions ?? true,
+        startTime: new Date().toISOString(), endTime: null, exitCode: null,
+      };
+      addPollRun(run);
+      spawnPollProcess(run);
+      return res.json({ success: true, issueCount: 1, execIds: [execId] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // JIRA test
   const jiraConfig = getAtlassianConfig();
   if (!jiraConfig) return res.status(400).json({ error: 'No Atlassian config found in settings.json' });
   try {
