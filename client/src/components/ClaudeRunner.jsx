@@ -47,13 +47,17 @@ export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRu
     }
   }, [selectedFile]);
 
-  // Pre-populate form when re-running a previous run
+  // Pre-populate form when re-running a previous run.
+  // Wait for commands to load before applying a command-based run, so the
+  // <select> has matching options when the value is set (avoids controlled
+  // select not updating when options arrive after the value is already set).
   useEffect(() => {
     if (!rerunnableRun) return;
     const prompt = rerunnableRun.prompt || '';
-    // Derive command — stored directly, or parse from label (e.g. "/dev:implement")
     const command = rerunnableRun.command
       || (rerunnableRun.label?.startsWith('/') ? rerunnableRun.label.replace(/^\//, '') : '');
+    // If command-based but commands haven't loaded yet, wait for next run of this effect
+    if (command && commands.length === 0) return;
     if (command) {
       const firstLine = prompt.split('\n')[0];
       const prefix = `/${command}`;
@@ -74,7 +78,7 @@ export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRu
     setAllowPermissions(rerunnableRun.allowPermissions ?? true);
     setProjectTab('local');
     onRerunnableConsumed?.();
-  }, [rerunnableRun]);
+  }, [rerunnableRun, commands]);
 
   const loadBbRepos = () => {
     if (bbRepos.length || bbLoading) return;
@@ -156,10 +160,12 @@ export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRu
             status: data.code === 0 ? 'done' : 'error',
             exitCode: data.code,
             endTime: new Date().toISOString(),
-            cancel: null
+            cancel: null,
+            ...(data.sessionId && { sessionId: data.sessionId, pausedForInput: data.pausedForInput ?? false }),
           });
+        } else {
+          appendRunOutput(runId, data);
         }
-        appendRunOutput(runId, data);
       }, attachedFiles, selectedCommand, cmdArgs);
       updateRun(runId, { cancel });
       await promise;

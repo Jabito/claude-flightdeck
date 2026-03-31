@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { sendRunInput, clearCommandRuns, deleteCommandRun, killRun } from '../api.js';
+import { sendRunInput, clearCommandRuns, deleteCommandRun, killRun, continueRun } from '../api.js';
 
 const URL_REGEX = /(https?:\/\/[^\s\])"'>]+)/g;
 function renderWithLinks(text) {
@@ -41,6 +41,8 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
   const [hoveredId, setHoveredId] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [feedbackMsg, setFeedbackMsg] = useState('');
+  const [continueMsg, setContinueMsg] = useState('');
+  const [continueAllowPerms, setContinueAllowPerms] = useState(false);
   const outputRef = useRef(null);
 
   // Tick for elapsed time on running jobs
@@ -78,8 +80,11 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
 
   const selected = runs.find(r => r.id === selectedId);
 
-  // Reset feedback input when switching runs
-  useEffect(() => { setFeedbackMsg(''); }, [selectedId]);
+  // Reset inputs when switching runs
+  useEffect(() => {
+    setFeedbackMsg('');
+    setContinueMsg('');
+  }, [selectedId]);
 
   const handleSendFeedback = async (quickMsg) => {
     const message = quickMsg ?? feedbackMsg.trim();
@@ -93,6 +98,36 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
     }
   };
 
+  const handleContinue = async () => {
+    const message = continueMsg.trim();
+    if (!message || !selected) return;
+    setContinueMsg('');
+
+    // Reset the existing run back to running — continuation streams into the same record
+    updateRun(selected.id, {
+      status: 'running',
+      endTime: null,
+      pausedForInput: false,
+      sessionId: null,
+      cancel: null,
+    });
+
+    const { cancel } = continueRun(selected.id, message, continueAllowPerms, (data) => {
+      if (data.type === 'done') {
+        updateRun(selected.id, {
+          status: data.code === 0 ? 'done' : 'error',
+          exitCode: data.code,
+          endTime: new Date().toISOString(),
+          cancel: null,
+          ...(data.sessionId && { sessionId: data.sessionId, pausedForInput: data.pausedForInput ?? false }),
+        });
+      } else {
+        appendRunOutput(selected.id, data);
+      }
+    });
+    updateRun(selected.id, { cancel });
+  };
+
   const handleDeleteRun = (e, id) => {
     e.stopPropagation();
     if (selectedId === id) {
@@ -104,8 +139,18 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
     deleteCommandRun(id).catch(() => {});
   };
 
-  const statusColor = (s) => s === 'running' ? '#f0883e' : s === 'done' ? '#3fb950' : s === 'killed' ? '#8b949e' : '#f85149';
-  const statusIcon = (s) => s === 'running' ? '◌' : s === 'done' ? '✓' : s === 'killed' ? '⊘' : '✗';
+  const statusColor = (s, run) => {
+    if (s === 'done' && run?.pausedForInput) return '#f0883e';
+    return s === 'running' ? '#f0883e' : s === 'done' ? '#3fb950' : s === 'killed' ? '#8b949e' : '#f85149';
+  };
+  const statusIcon = (s, run) => {
+    if (s === 'done' && run?.pausedForInput) return '⏸';
+    return s === 'running' ? '◌' : s === 'done' ? '✓' : s === 'killed' ? '⊘' : '✗';
+  };
+  const statusLabel = (s, run) => {
+    if (s === 'done' && run?.pausedForInput) return 'waiting for input';
+    return s;
+  };
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -133,10 +178,12 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
           )}
           {runs.map(run => {
             const isSelected = run.id === selectedId;
-            const sColor = statusColor(run.status);
+            const sColor = statusColor(run.status, run);
             const lastLine = run.output?.[run.output.length - 1];
-            const waitingForInput = run.status === 'running' && run.allowPermissions === false
-              && (lastLine?.type === 'ask_user' || lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i));
+            const waitingForInput =
+              (run.status === 'running' && run.allowPermissions === false
+                && (lastLine?.type === 'ask_user' || lastLine?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i)))
+              || (run.status === 'done' && run.pausedForInput);
             return (
               <div
                 key={run.id}
@@ -153,9 +200,10 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                   <span style={{
                     fontSize: 11, color: sColor,
-                    ...(run.status === 'running' ? { animation: 'spin 1.5s linear infinite', display: 'inline-block' } : {})
+                    ...(run.status === 'running' ? { animation: 'spin 1.5s linear infinite', display: 'inline-block' } : {}),
+                    ...(waitingForInput && run.status === 'done' ? { animation: 'pulse 1s ease-in-out infinite' } : {})
                   }}>
-                    {statusIcon(run.status)}
+                    {statusIcon(run.status, run)}
                   </span>
                   <span style={{ fontSize: 11, fontWeight: 600, color: '#e6edf3', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {run.label}
@@ -177,8 +225,10 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                 <div style={{ display: 'flex', gap: 8, fontSize: 10, color: '#8b949e' }}>
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{run.projectName}</span>
                   {waitingForInput
-                    ? <span style={{ color: '#f0883e', animation: 'pulse 1s ease-in-out infinite', whiteSpace: 'nowrap' }}>⏸ needs input</span>
-                    : <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{elapsed(run.startTime, run.endTime)}</span>
+                    ? <span style={{ color: '#f0883e', animation: 'pulse 1s ease-in-out infinite', whiteSpace: 'nowrap' }}>⏸ waiting for input</span>
+                    : run.status === 'done' && run.sessionId
+                      ? <span style={{ color: '#79c0ff', whiteSpace: 'nowrap' }}>↺ resumable</span>
+                      : <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{elapsed(run.startTime, run.endTime)}</span>
                   }
                 </div>
                 {run.startTime && (
@@ -198,8 +248,8 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
           <>
             {/* Run header */}
             <div style={{ padding: '8px 14px', borderBottom: '1px solid #30363d', background: '#161b22', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 11, color: statusColor(selected.status), fontWeight: 600 }}>
-                {statusIcon(selected.status)} {selected.status}
+              <span style={{ fontSize: 11, color: statusColor(selected.status, selected), fontWeight: 600 }}>
+                {statusIcon(selected.status, selected)} {statusLabel(selected.status, selected)}
               </span>
               <span style={{ fontSize: 12, color: '#e6edf3', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {selected.label}
@@ -297,56 +347,78 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
               {selected.status === 'running' && <div style={{ color: '#8b949e', marginTop: 4 }}>▋</div>}
             </div>
 
-            {/* Feedback input — only for running jobs without dangerously-skip-permissions */}
-            {selected.status === 'running' && selected.allowPermissions === false && (
+            {/* Reply panel — shown when Claude asked a question and exited (pausedForInput) or run is resumable */}
+            {selected.status === 'done' && selected.sessionId && (
               <div style={{
-                padding: '8px 14px', borderTop: '1px solid #30363d',
-                background: '#161b22', flexShrink: 0,
-                display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap'
+                padding: '10px 14px', flexShrink: 0,
+                borderTop: selected.pausedForInput ? '2px solid #f0883e' : '1px solid #30363d',
+                background: selected.pausedForInput ? '#1a1000' : '#0d1117',
               }}>
-                <span style={{ fontSize: 10, color: '#8b949e', whiteSpace: 'nowrap' }}>Reply:</span>
-                {(() => {
-                  const lastLine = selected.output?.[selected.output.length - 1];
-                  const askOptions = lastLine?.type === 'ask_user' && lastLine.options?.length > 0
-                    ? lastLine.options
-                    : ['y', 'n'];
-                  return askOptions.map(q => (
-                    <button
-                      key={q}
-                      onClick={() => handleSendFeedback(q)}
-                      style={{
-                        background: '#0d1117', color: '#e6edf3',
-                        border: '1px solid #30363d', borderRadius: 4,
-                        padding: '3px 10px', fontSize: 11, cursor: 'pointer'
-                      }}
-                    >
-                      {q}
-                    </button>
-                  ));
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 11, color: '#f0883e', fontWeight: 600 }}>
+                    {selected.pausedForInput ? '⏸ Claude is waiting for your reply' : '↺ Continue conversation'}
+                  </span>
+                  <span style={{ fontSize: 10, color: '#484f58', flex: 1 }}>
+                    {selected.pausedForInput ? 'Type your answer below to resume' : 'Send a follow-up to continue this session'}
+                  </span>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 11, color: '#8b949e' }}>
+                    <input
+                      type="checkbox"
+                      checked={continueAllowPerms}
+                      onChange={e => setContinueAllowPerms(e.target.checked)}
+                      style={{ accentColor: '#1f6feb', cursor: 'pointer' }}
+                    />
+                    Allow all permissions
+                  </label>
+                </div>
+                {/* Quick-reply options from last ask_user event */}
+                {selected.pausedForInput && (() => {
+                  const lastAsk = [...(selected.output || [])].reverse().find(l => l.type === 'ask_user');
+                  return lastAsk?.options?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                      {lastAsk.options.map(opt => (
+                        <button
+                          key={opt}
+                          onClick={() => { setContinueMsg(opt); }}
+                          style={{
+                            background: '#2d1a00', color: '#f0883e',
+                            border: '1px solid #f0883e', borderRadius: 4,
+                            padding: '3px 12px', fontSize: 11, cursor: 'pointer'
+                          }}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                  );
                 })()}
-                <input
-                  value={feedbackMsg}
-                  onChange={e => setFeedbackMsg(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && feedbackMsg.trim() && handleSendFeedback()}
-                  placeholder="Send message to Claude…"
-                  style={{
-                    flex: 1, background: '#0d1117', color: '#e6edf3',
-                    border: '1px solid #30363d', borderRadius: 6,
-                    padding: '5px 10px', fontSize: 12, outline: 'none', fontFamily: 'inherit'
-                  }}
-                />
-                <button
-                  onClick={() => handleSendFeedback()}
-                  disabled={!feedbackMsg.trim()}
-                  style={{
-                    background: feedbackMsg.trim() ? '#1f6feb' : '#21262d',
-                    color: feedbackMsg.trim() ? '#fff' : '#484f58',
-                    border: 'none', borderRadius: 6, padding: '5px 14px',
-                    fontSize: 12, cursor: feedbackMsg.trim() ? 'pointer' : 'default'
-                  }}
-                >
-                  Send
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    autoFocus={selected.pausedForInput}
+                    value={continueMsg}
+                    onChange={e => setContinueMsg(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && continueMsg.trim() && handleContinue()}
+                    placeholder={selected.pausedForInput ? 'Type your answer…' : 'Type your follow-up…'}
+                    style={{
+                      flex: 1, color: '#e6edf3',
+                      background: selected.pausedForInput ? '#0d1117' : '#0d1117',
+                      border: `1px solid ${selected.pausedForInput ? '#f0883e' : '#30363d'}`,
+                      borderRadius: 6, padding: '6px 10px', fontSize: 12, outline: 'none', fontFamily: 'inherit'
+                    }}
+                  />
+                  <button
+                    onClick={handleContinue}
+                    disabled={!continueMsg.trim()}
+                    style={{
+                      background: continueMsg.trim() ? (selected.pausedForInput ? '#c05c00' : '#1f6feb') : '#21262d',
+                      color: continueMsg.trim() ? '#fff' : '#484f58',
+                      border: 'none', borderRadius: 6, padding: '6px 16px',
+                      fontSize: 12, cursor: continueMsg.trim() ? 'pointer' : 'default', whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {selected.pausedForInput ? '↩ Reply' : '↺ Continue'}
+                  </button>
+                </div>
               </div>
             )}
           </>

@@ -176,6 +176,36 @@ export async function sendRunInput(runId, message) {
   return r.json();
 }
 
+export function continueRun(parentRunId, message, allowPermissions, onData) {
+  let cancel = () => {};
+  const promise = fetch(`${BASE}/run-claude/${parentRunId}/continue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, allowPermissions })
+  }).then(response => {
+    const reader = response.body.getReader();
+    cancel = () => reader.cancel();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    function pump() {
+      return reader.read().then(({ done, value }) => {
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        lines.forEach(line => {
+          if (line.startsWith('data: ')) {
+            try { onData(JSON.parse(line.slice(6))); } catch {}
+          }
+        });
+        return pump();
+      }).catch(() => {});
+    }
+    return pump();
+  });
+  return { promise, cancel: () => cancel() };
+}
+
 export async function sendWebhookRunInput(execId, message) {
   const r = await fetch(`${BASE}/webhooks/runs/${execId}/input`, {
     method: 'POST',

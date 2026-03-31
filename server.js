@@ -700,6 +700,7 @@ app.post('/api/run-claude', (req, res) => {
     label: rawPrompt.split('\n')[0].slice(0, 80),
     command: runCommand || '',
     args: runArgs || '',
+    prompt: rawPrompt,
     projectPath,
     projectName: path.basename(projectPath),
     allowPermissions: allowPermissions !== false,
@@ -741,7 +742,7 @@ app.post('/api/run-claude', (req, res) => {
   const proc = spawn(CLAUDE_BIN, args, {
     cwd: projectPath,
     env: { ...process.env },
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe']
   });
 
   if (runId) claudeProcs.set(runId, proc);
@@ -779,6 +780,7 @@ app.post('/api/run-claude', (req, res) => {
           }
         } else if (event.type === 'result') {
           if (event.is_error) send({ type: 'error', message: event.result ?? 'Unknown error' });
+          if (event.session_id) runRecord.sessionId = event.session_id;
         }
       } catch {
         send({ type: 'output', message: line });
@@ -795,8 +797,11 @@ app.post('/api/run-claude', (req, res) => {
       runRecord.exitCode = code;
       runRecord.endTime = new Date().toISOString();
     }
+    const pausedForInput = code === 0 && !!runRecord.sessionId
+      && runRecord.output.some(l => l.type === 'ask_user');
+    runRecord.pausedForInput = pausedForInput;
     saveCommandRuns();
-    send({ type: 'done', code, signal });
+    send({ type: 'done', code, signal, sessionId: runRecord.sessionId, pausedForInput });
     runEmitters.delete(recId);
     if (!res.writableEnded) try { res.end(); } catch {}
   });
@@ -872,6 +877,117 @@ app.post('/api/run-claude/:runId/input', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Resume a run in-place — streams the reply back into the same run record
+app.post('/api/run-claude/:runId/continue', (req, res) => {
+  const run = commandRunsStore.find(r => r.id === req.params.runId);
+  if (!run?.sessionId) return res.status(400).json({ error: 'No session ID available for this run' });
+
+  const { message, allowPermissions } = req.body;
+  if (!message) return res.status(400).json({ error: 'message required' });
+
+  // Mutate the existing run back to running state
+  const prevSessionId = run.sessionId;
+  run.status = 'running';
+  run.endTime = null;
+  run.pausedForInput = false;
+  run.sessionId = null;
+  run.allowPermissions = allowPermissions !== false;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Re-create emitter for this run (previous one was deleted on prior close)
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  runEmitters.set(run.id, emitter);
+
+  const outputStartIdx = run.output.length;
+  const send = (data) => {
+    if (data.type !== 'start') run.output.push(data);
+    emitter.emit('data', data);
+  };
+  const onInitialData = (data) => {
+    if (!res.writableEnded) try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+  };
+  emitter.on('data', onInitialData);
+  try { res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`); } catch {}
+
+  // Visual separator showing the user's reply
+  send({ type: 'meta', message: `\n↩ You: ${message}` });
+
+  const args = ['--resume', prevSessionId, '-p', message, '--output-format', 'stream-json', '--verbose'];
+  if (allowPermissions) args.push('--dangerously-skip-permissions');
+
+  const proc = spawn(CLAUDE_BIN, args, {
+    cwd: run.projectPath,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  claudeProcs.set(run.id, proc);
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', d => {
+    stdoutBuf += d.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'text' && block.text) {
+              send({ type: 'output', message: block.text });
+            } else if (block.type === 'tool_use') {
+              if (block.name === 'AskUserQuestion') {
+                send({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
+              } else {
+                const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
+                send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+              }
+            }
+          }
+        } else if (event.type === 'user') {
+          for (const block of event.message?.content ?? []) {
+            if (block.type === 'tool_result') {
+              const content = Array.isArray(block.content)
+                ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+                : String(block.content ?? '');
+              if (content) send({ type: 'tool_result', message: content.slice(0, 500) });
+            }
+          }
+        } else if (event.type === 'result') {
+          if (event.is_error) send({ type: 'error', message: event.result ?? 'Unknown error' });
+          if (event.session_id) run.sessionId = event.session_id;
+        }
+      } catch {
+        send({ type: 'output', message: line });
+      }
+    }
+  });
+  proc.stderr.on('data', d => send({ type: 'error', message: d.toString() }));
+  proc.on('close', (code, signal) => {
+    claudeProcs.delete(run.id);
+    if (run.status === 'running') {
+      run.status = code === 0 ? 'done' : 'error';
+      run.exitCode = code;
+      run.endTime = new Date().toISOString();
+    }
+    // Only check output added during THIS continuation for ask_user
+    const pausedForInput = code === 0 && !!run.sessionId
+      && run.output.slice(outputStartIdx).some(l => l.type === 'ask_user');
+    run.pausedForInput = pausedForInput;
+    saveCommandRuns();
+    send({ type: 'done', code, signal, sessionId: run.sessionId, pausedForInput });
+    runEmitters.delete(run.id);
+    if (!res.writableEnded) try { res.end(); } catch {}
+  });
+  proc.on('error', err => { send({ type: 'error', message: `spawn error: ${err.message}` }); });
+  res.on('close', () => { emitter.off('data', onInitialData); });
 });
 
 app.get('/api/command-runs', (_req, res) => res.json(commandRunsStore));

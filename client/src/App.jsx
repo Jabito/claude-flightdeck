@@ -87,6 +87,7 @@ export default function App() {
               exitCode: data.code,
               endTime: new Date().toISOString(),
               cancel: null,
+              ...(data.sessionId && { sessionId: data.sessionId, pausedForInput: data.pausedForInput ?? false }),
             });
           } else {
             appendRunOutput(run.id, { ...data, receivedAt: Date.now() });
