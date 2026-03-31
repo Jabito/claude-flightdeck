@@ -914,7 +914,7 @@ app.post('/api/run-claude/:runId/continue', (req, res) => {
     if (!res.writableEnded) try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
   };
   emitter.on('data', onInitialData);
-  try { res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`); } catch {}
+  try { res.write(`data: ${JSON.stringify({ type: 'start', message: '' })}\n\n`); } catch {}
 
   // Visual separator showing the user's reply
   send({ type: 'meta', message: `\n↩ You: ${message}` });

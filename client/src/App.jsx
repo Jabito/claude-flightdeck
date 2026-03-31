@@ -10,7 +10,7 @@ import AutomationRunsPanel from './components/AutomationRunsPanel.jsx';
 import ProjectsManager from './components/ProjectsManager.jsx';
 import { getFileTree, getRelationships, saveFile, moveFile, getFile, getCommandRuns, streamRun } from './api.js';
 
-function NavItem({ icon, label, active, badge, onClick }) {
+function NavItem({ icon, label, active, badge, badgeColor, onClick }) {
   return (
     <button
       onClick={onClick}
@@ -28,8 +28,8 @@ function NavItem({ icon, label, active, badge, onClick }) {
       {badge != null && (
         <span style={{
           fontSize: 10,
-          background: active ? '#1f6feb' : '#30363d',
-          color: active ? '#fff' : '#8b949e',
+          background: badgeColor ?? (active ? '#1f6feb' : '#30363d'),
+          color: '#fff',
           borderRadius: 10, padding: '1px 5px', minWidth: 16, textAlign: 'center'
         }}>
           {badge}
@@ -175,6 +175,7 @@ export default function App() {
   }, []);
 
   const activeRunCount = runs.filter(r => r.status === 'running').length;
+  const pausedRunCount = runs.filter(r => r.pausedForInput).length;
 
   const pageBtnStyle = (active) => ({
     padding: '4px 14px', fontSize: 12, border: 'none', cursor: 'pointer', borderRadius: 5,
@@ -209,6 +210,11 @@ export default function App() {
             {activeRunCount > 0 && (
               <span style={{ fontSize: 10, background: '#f0883e', color: '#fff', borderRadius: 8, padding: '1px 5px', lineHeight: 1.4 }}>
                 {activeRunCount}
+              </span>
+            )}
+            {pausedRunCount > 0 && (
+              <span style={{ fontSize: 10, background: '#b45309', color: '#fff', borderRadius: 8, padding: '1px 5px', lineHeight: 1.4 }}>
+                ⏸ {pausedRunCount}
               </span>
             )}
           </button>
@@ -333,7 +339,12 @@ export default function App() {
               <NavItem icon="▶" label="Run" active={executeTab === 'runner'} onClick={() => setExecuteTab('runner')} />
               <NavItem
                 icon="◑" label="Runs" active={executeTab === 'runs'}
-                badge={activeRunCount > 0 ? activeRunCount : runs.length > 0 ? runs.length : null}
+                badge={
+                  pausedRunCount > 0 ? `⏸ ${pausedRunCount}` :
+                  activeRunCount > 0 ? activeRunCount :
+                  runs.length > 0 ? runs.length : null
+                }
+                badgeColor={pausedRunCount > 0 ? '#b45309' : activeRunCount > 0 ? '#f0883e' : undefined}
                 onClick={() => setExecuteTab('runs')}
               />
               <NavDivider />

@@ -63,13 +63,10 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
     if (runs[0]?.status === 'running') setSelectedId(runs[0].id);
   }, [runs[0]?.id]);
 
-  // Auto-select a run that is waiting for user input
+  // Auto-select a run that is waiting for user input, but don't interrupt if user is watching a running run
   useEffect(() => {
-    const waiting = runs.find(r =>
-      r.status === 'running' && r.allowPermissions === false &&
-      (r.output?.slice(-1)[0]?.type === 'ask_user' ||
-       r.output?.slice(-1)[0]?.message?.match(/\?\s*$|\(y\/n\)|\(yes\/no\)/i))
-    );
+    if (selected?.status === 'running') return;
+    const waiting = runs.find(r => r.pausedForInput);
     if (waiting) setSelectedId(waiting.id);
   }, [runs]);
 
@@ -226,9 +223,7 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{run.projectName}</span>
                   {waitingForInput
                     ? <span style={{ color: '#f0883e', animation: 'pulse 1s ease-in-out infinite', whiteSpace: 'nowrap' }}>⏸ waiting for input</span>
-                    : run.status === 'done' && run.sessionId
-                      ? <span style={{ color: '#79c0ff', whiteSpace: 'nowrap' }}>↺ resumable</span>
-                      : <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{elapsed(run.startTime, run.endTime)}</span>
+                    : <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{elapsed(run.startTime, run.endTime)}</span>
                   }
                 </div>
                 {run.startTime && (
@@ -334,7 +329,7 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                   : '#e6edf3';
                 const text = line.type === 'done'
                   ? `\n${line.code === 0 ? '✓' : '✗'} Process exited (code ${line.code}${line.signal ? `, signal ${line.signal}` : ''})`
-                  : line.message;
+                  : (line.message ?? '');
                 return (
                   <div key={i} style={{ display: 'flex', alignItems: 'flex-start' }}>
                     <div style={{ flex: 1, color, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
