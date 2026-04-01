@@ -34,6 +34,23 @@ const SKIP_DIRS = new Set([
 app.use(express.json({ limit: '10mb' }));
 app.use(require('cors')());
 
+// Extract the most human-readable field from a tool's input object
+function toolDetail(name, input) {
+  if (!input) return '';
+  const v =
+    input.description ??   // Agent
+    input.command ??        // Bash
+    input.file_path ??      // Read, Write, Edit
+    input.pattern ??        // Glob, Grep
+    input.url ??            // WebFetch
+    input.query ??          // WebSearch
+    input.prompt ??         // Agent (fallback)
+    Object.values(input)[0] ??
+    '';
+  // First line only, max 120 chars
+  return String(v).split('\n')[0].slice(0, 120);
+}
+
 // ─── File tree ───────────────────────────────────────────────────────────────
 
 function buildFileTree(dirPath, depth = 0) {
@@ -780,8 +797,7 @@ app.post('/api/run-claude', (req, res) => {
               if (block.name === 'AskUserQuestion') {
                 send({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
               } else {
-                const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
-                send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+                send({ type: 'tool', message: `⚙ ${block.name}`, detail: toolDetail(block.name, block.input) });
               }
             }
           }
@@ -962,8 +978,7 @@ app.post('/api/run-claude/:runId/continue', (req, res) => {
               if (block.name === 'AskUserQuestion') {
                 send({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
               } else {
-                const preview = JSON.stringify(block.input ?? {}).slice(0, 120);
-                send({ type: 'tool', message: `⚙ ${block.name}`, detail: preview });
+                send({ type: 'tool', message: `⚙ ${block.name}`, detail: toolDetail(block.name, block.input) });
               }
             }
           }
@@ -1401,8 +1416,7 @@ function spawnPollProcess(run) {
               if (block.name === 'AskUserQuestion') {
                 run.output.push({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
               } else {
-                const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
-                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail: toolDetail(block.name, block.input) });
               }
             }
           }
@@ -1842,8 +1856,7 @@ function spawnScheduleProcess(run) {
               if (block.name === 'AskUserQuestion') {
                 run.output.push({ type: 'ask_user', message: block.input?.question ?? '', options: block.input?.options ?? [] });
               } else {
-                const detail = JSON.stringify(block.input ?? {}).slice(0, 120);
-                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail });
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail: toolDetail(block.name, block.input) });
               }
             }
           }

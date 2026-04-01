@@ -1,6 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { sendRunInput, clearCommandRuns, deleteCommandRun, killRun, continueRun } from '../api.js';
 
+const TOOL_ICONS = {
+  Bash: '$', Shell: '$',
+  Read: '○', Write: '↑', Edit: '✎', MultiEdit: '✎',
+  Glob: '⌕', Grep: '⌕',
+  Agent: '◈',
+  WebFetch: '↗', WebSearch: '↗',
+  TodoWrite: '☑', TodoRead: '☑',
+  NotebookRead: '◉', NotebookEdit: '◉',
+};
+
 const URL_REGEX = /(https?:\/\/[^\s\])"'>]+)/g;
 function renderWithLinks(text) {
   const parts = text.split(URL_REGEX);
@@ -140,9 +150,10 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
     if (s === 'done' && run?.pausedForInput) return '#f0883e';
     return s === 'running' ? '#f0883e' : s === 'done' ? '#3fb950' : s === 'killed' ? '#8b949e' : '#f85149';
   };
-  const statusIcon = (s, run) => {
+  const statusIcon = (s, run, forHeader = false) => {
     if (s === 'done' && run?.pausedForInput) return '⏸';
-    return s === 'running' ? '◌' : s === 'done' ? '✓' : s === 'killed' ? '⊘' : '✗';
+    if (s === 'running') return forHeader ? '⟳' : '◌';
+    return s === 'done' ? '✓' : s === 'killed' ? '⊘' : '✗';
   };
   const statusLabel = (s, run) => {
     if (s === 'done' && run?.pausedForInput) return 'waiting for input';
@@ -305,15 +316,23 @@ export default function RunsPanel({ runs, setRuns, updateRun, appendRunOutput, o
                     {tsEl}
                   </div>
                 );
-                if (line.type === 'tool') return (
-                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', margin: '4px 0' }}>
-                    <div style={{ flex: 1, padding: '4px 8px', borderRadius: 4, background: '#161b22', border: '1px solid #30363d' }}>
-                      <span style={{ color: '#d2a679', fontWeight: 600 }}>{line.message}</span>
-                      {line.detail && <span style={{ color: '#484f58', marginLeft: 8 }}>{line.detail}</span>}
+                if (line.type === 'tool') {
+                  const rawName = (line.message ?? '').replace('⚙ ', '');
+                  const icon = TOOL_ICONS[rawName] ?? '⚙';
+                  return (
+                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', margin: '4px 0' }}>
+                      <div style={{ flex: 1, padding: '4px 8px', borderRadius: 4, background: '#161b22', border: '1px solid #30363d', minWidth: 0 }}>
+                        <span style={{ color: '#d2a679', fontWeight: 600 }}>{icon} {rawName}</span>
+                        {line.detail && (
+                          <span style={{ color: '#8b949e', marginLeft: 8, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', maxWidth: '70%', verticalAlign: 'middle' }}>
+                            {line.detail}
+                          </span>
+                        )}
+                      </div>
+                      {tsEl}
                     </div>
-                    {tsEl}
-                  </div>
-                );
+                  );
+                }
                 if (line.type === 'tool_result') return (
                   <div key={i} style={{ display: 'flex', alignItems: 'flex-start', margin: '2px 0 4px 16px' }}>
                     <div style={{ flex: 1, padding: '3px 8px', borderLeft: '2px solid #30363d', color: '#8b949e', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11 }}>
