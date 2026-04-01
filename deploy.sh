@@ -16,6 +16,14 @@ die()  { echo -e "${RED}✗${RESET} $*"; exit 1; }
 
 echo -e "\n${BOLD}◈ Claude Manager — Deploy${RESET}\n"
 
+# ── Resolve pm2 ──────────────────────────────────────────────────────────────
+if command -v pm2 &>/dev/null; then
+  PM2="pm2"
+else
+  PM2="npx pm2"
+  log "pm2 not in PATH — using npx"
+fi
+
 # ── Parse args ────────────────────────────────────────────────────────────────
 CMD="${1:-deploy}"   # deploy | stop | restart | status | logs
 
@@ -38,16 +46,16 @@ deploy)
   ok "Client built → client/dist/"
 
   # 3. Start/restart via pm2
-  if pm2 describe "$APP" &>/dev/null; then
+  if $PM2 describe "$APP" &>/dev/null; then
     log "Restarting existing pm2 process…"
-    pm2 restart "$DIR/ecosystem.config.cjs" --update-env
+    $PM2 restart "$DIR/ecosystem.config.cjs" --update-env
   else
     log "Starting with pm2…"
-    pm2 start "$DIR/ecosystem.config.cjs"
+    $PM2 start "$DIR/ecosystem.config.cjs"
   fi
 
   # 4. Save pm2 list so it survives reboots
-  pm2 save --force &>/dev/null
+  $PM2 save --force &>/dev/null
 
   echo ""
   ok "Deployed! Running at ${BOLD}http://localhost:${PORT}${RESET}"
@@ -60,8 +68,8 @@ deploy)
 
 # ── STOP ─────────────────────────────────────────────────────────────────────
 stop)
-  if pm2 describe "$APP" &>/dev/null; then
-    pm2 stop "$APP"
+  if $PM2 describe "$APP" &>/dev/null; then
+    $PM2 stop "$APP"
     ok "Stopped $APP"
   else
     warn "$APP is not running"
@@ -76,8 +84,8 @@ restart)
 
 # ── STATUS ───────────────────────────────────────────────────────────────────
 status)
-  if pm2 describe "$APP" &>/dev/null; then
-    pm2 show "$APP"
+  if $PM2 describe "$APP" &>/dev/null; then
+    $PM2 show "$APP"
   else
     warn "$APP is not registered with pm2"
   fi
@@ -85,13 +93,13 @@ status)
 
 # ── LOGS ─────────────────────────────────────────────────────────────────────
 logs)
-  pm2 logs "$APP" --lines "${2:-50}"
+  $PM2 logs "$APP" --lines "${2:-50}"
   ;;
 
 # ── DELETE (full remove) ─────────────────────────────────────────────────────
 delete)
-  pm2 delete "$APP" 2>/dev/null || true
-  pm2 save --force &>/dev/null
+  $PM2 delete "$APP" 2>/dev/null || true
+  $PM2 save --force &>/dev/null
   ok "Removed $APP from pm2"
   ;;
 
