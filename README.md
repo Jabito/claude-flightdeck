@@ -1,9 +1,12 @@
-# Claude Flightdeck
+# ◈ Claude Flightdeck
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 
-A visual control panel for [Claude Code](https://claude.ai/code) — manage your agent files, run commands, automate workflows via webhooks, JIRA polls, and schedules, and watch everything happen in real time.
+**A visual control panel for [Claude Code](https://claude.ai/code)** — explore your agent ecosystem, run commands, schedule automations, and monitor everything in real time.
+
+Claude Flightdeck turns your `~/.claude` directory into a full-featured workspace. Visualize how your agents, commands, and skills interconnect, edit files with syntax highlighting, execute workflows with live streaming output, and set up automated jobs that run on schedules or respond to webhooks and JIRA tickets.
 
 **Project Owner:** Jose Paolo "Javi" Javier
 
@@ -11,62 +14,142 @@ A visual control panel for [Claude Code](https://claude.ai/code) — manage your
 
 ---
 
-## Features
+## Screenshots
 
-### File Workspace
-- Browse, edit, and save files under `~/.claude/` — agents, commands, skills, settings, and more
-- Relationship graph showing connections between agents, commands, and skills
-- Monaco-based editor with syntax highlighting
-- Move and reorganize files within the workspace
+### Workspace — Relationship Graph & Editor
+Visualize your entire agent ecosystem. Click any node to inspect connections, double-click to open in the editor.
 
-### Run Tab
-- Select any Claude Code slash command (e.g. `/dev:plan`, `/doc:knowledge`) from a dropdown
-- Add arguments, context, and attach files
-- Choose any local or Bitbucket project as the working directory
-- Live streaming output with per-line elapsed timestamps
-- Toggle `--dangerously-skip-permissions` per run
+![Workspace — Relationship Graph & Editor](docs/screenshots/workspace-editor.png)
 
-### Runs List
-- Full history of all command runs with start datetime and elapsed duration
-- Re-run any previous run — pre-populates the Run form with original parameters
-- Interactive reply input: send `y`, `n`, or custom messages to Claude mid-run (for runs without skip-permissions)
-- Visual "⏸ needs input" indicator when Claude is waiting for a response
-- Kill running processes; clear history
+### Workspace — Full Dashboard
+See all commands, orchestrators, agents, skills, hooks, and services at a glance with the Type view.
 
-### Webhooks
-- Register HTTP webhook endpoints (e.g. `POST /webhooks/create-plan`)
-- Map payload fields to command arguments via `{{template}}` tokens
-- Optional secret key validation
-- View per-webhook run history with full output
+![Workspace — Full Dashboard](docs/screenshots/workspace-dashboard.png)
 
-### JIRA Polls
-- Periodically query Jira with any JQL filter
-- Trigger a Claude command for each newly matched issue
-- Token templates: `{{key}}`, `{{summary}}`, `{{status}}`, `{{assignee}}`, `{{type}}`
-- Configurable interval (5m – 2h+), max issues per cycle, enable/disable per poll
-- Supports Jira Server/DC (PAT/Bearer) and Jira Cloud (email + API token)
+### Execute — Run History & Live Output
+Track all command executions with real-time SSE streaming, interactive input, and re-run capability.
 
-### Schedules
-- Cron-based scheduled Claude command runs
-- Per-schedule command, arguments, project path, and permissions
-- Run immediately via "Run Now" for testing
+![Execute — Run Logs](docs/screenshots/execute-runs.png)
 
-### Auto Runs Panel
-- Unified view of all webhook, poll, and schedule run history
-- Filter by source type
-- Live output streaming, kill controls, and interactive reply input for automation runs
+### Automation — Scheduled Jobs
+Set up JIRA-driven or cron-based scheduled jobs that auto-trigger Claude commands on a recurring timer.
+
+![Automation — Scheduled Jobs](docs/screenshots/scheduled-jobs.png)
 
 ---
 
-## Tech Stack
+## Features
 
-| Layer | Technology |
+### Workspace
+
+| Feature | Description |
 |---|---|
-| Backend | Node.js + Express |
-| Frontend | React 18 + Vite |
-| Editor | Monaco Editor |
-| Graph | React Flow |
-| Process manager | pm2 |
+| **File Explorer** | Browse and manage your `~/.claude` directory with drag-drop, inline folder creation, and context menus |
+| **Relationship Graph** | Interactive ReactFlow node graph mapping connections between commands, orchestrators, agents, skills, hooks, and external services |
+| **Dual-View Editor** | Monaco-powered editor with syntax highlighting (Markdown, JSON, JS, TS, YAML) — opens side-by-side with the graph |
+| **Node Inspection** | Click any node to see its connections, open in editor, focus its subgraph, or run it directly |
+| **View Modes** | Switch between **Folder** (grouped by domain) and **Type** (grouped by category) layouts |
+| **Search & Filter** | Filter by node type, edge type (spawns/uses/accesses), or search by name with real-time highlighting |
+
+### Execute
+
+| Feature | Description |
+|---|---|
+| **Command Runner** | Select any command from `~/.claude/commands/`, attach files, set arguments/context, and choose a project directory |
+| **Live Streaming** | Real-time SSE output with per-line elapsed timestamps, auto-scroll, and URL auto-linking |
+| **Run History** | Full execution log with status badges, duration, exit codes — re-run any previous execution with one click |
+| **Interactive Sessions** | When Claude pauses to ask a question, respond directly in the UI with yes/no or custom input |
+| **Process Management** | Kill running processes, reconnect to active streams, manage concurrent executions |
+
+### Automation
+
+| Feature | Description |
+|---|---|
+| **Scheduled Jobs** | Cron-based scheduling with JIRA, Bitbucket, or free-prompt sources — auto-triggers Claude commands on a timer |
+| **JIRA Polls** | Define JQL filters to watch for matching issues; auto-execute commands with token templates (`{{key}}`, `{{summary}}`, `{{status}}`, `{{assignee}}`, `{{type}}`) |
+| **Webhooks** | Create HTTP endpoints that trigger Claude commands when called by external services — supports payload templates and secret validation |
+| **Triggered Events** | Unified history of all automation runs with live output streaming, source-type filtering, and interactive input |
+
+### Projects
+
+| Feature | Description |
+|---|---|
+| **Project Browser** | View all Claude Code projects with CLAUDE.md previews and scope inspection |
+| **Cascade Cleanup** | Delete a project and automatically clean up associated webhooks, polls, schedules, and run history |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Node.js** 18+
+- **[Claude Code CLI](https://claude.ai/code)** installed and accessible as `claude`
+- **pm2** (optional — `npm install -g pm2`) for production deployment
+
+### Install & Deploy
+
+```bash
+git clone https://github.com/Jabito/claude-flightdeck.git
+cd claude-flightdeck
+
+# Deploy: installs deps, builds client, starts via pm2
+bash deploy.sh
+
+# Open in browser
+open http://localhost:3001
+```
+
+### Deploy Commands
+
+```bash
+bash deploy.sh             # Build + start/restart (default)
+bash deploy.sh restart     # Rebuild and restart
+bash deploy.sh stop        # Stop the server
+bash deploy.sh status      # Show pm2 process info
+bash deploy.sh logs        # Tail logs (add number for line count: logs 100)
+bash deploy.sh delete      # Remove from pm2 entirely
+```
+
+### Development Mode
+
+```bash
+npm install
+cd client && npm install && cd ..
+npm run dev    # Starts backend (nodemon) + Vite dev server concurrently
+```
+
+---
+
+## Architecture
+
+```
+claude-manager/
+├── server.js                # Express backend — API, SSE streaming, process management
+├── ecosystem.config.cjs     # pm2 production config
+├── deploy.sh                # One-command deploy script
+├── client/
+│   ├── src/
+│   │   ├── App.jsx                      # Main app — Workspace & Execute pages
+│   │   ├── api.js                       # API client
+│   │   └── components/
+│   │       ├── FileExplorer.jsx         # Tree view with drag-drop
+│   │       ├── RelationshipGraph.jsx    # ReactFlow node graph
+│   │       ├── FileEditor.jsx           # Monaco editor wrapper
+│   │       ├── ClaudeRunner.jsx         # Command execution form
+│   │       ├── RunsPanel.jsx            # Run history & output viewer
+│   │       ├── WebhookManager.jsx       # Webhook CRUD
+│   │       ├── ScheduleManager.jsx      # Cron + JIRA poll manager
+│   │       ├── PollManager.jsx          # JIRA poll config
+│   │       ├── AutomationRunsPanel.jsx  # Triggered event history
+│   │       ├── ProjectsManager.jsx      # Project browser
+│   │       └── WebhookRunsPanel.jsx     # Webhook run history
+│   └── vite.config.js
+├── webhooks.json            # Webhook definitions (per-user, gitignored)
+├── polls.json               # JIRA poll definitions
+├── schedules.json           # Scheduled job definitions
+└── *-runs.json              # Execution history (per category)
+```
 
 ---
 
@@ -94,7 +177,9 @@ Claude Flightdeck reads from and manages the standard Claude Code directory at `
 │   ├── dev/
 │   ├── docs/
 │   └── ...
-└── instincts/                   # Auto-generated pattern memory (self-evolution)
+└── hooks/                       # Hook scripts (lifecycle event handlers)
+    ├── cl-observe.sh
+    └── cl-stop.sh
 ```
 
 ### `plugins.local.md` — Credential Format
@@ -122,46 +207,27 @@ For Jira Cloud (email + API token), configure instead in `~/.claude/settings.jso
 
 ---
 
-## Setup
+## Integrations
 
-### Prerequisites
+| Service | Capabilities |
+|---|---|
+| **Jira** | JQL polling, issue token templates, ticket-driven automation (Server/DC + Cloud) |
+| **Confluence** | Service discovery, documentation workflows |
+| **Bitbucket** | Repo listing, branch monitoring, commit-triggered runs |
+| **GitHub** | Service discovery and metadata |
 
-- Node.js 18+
-- npm
-- [Claude Code CLI](https://claude.ai/code) installed and accessible as `claude`
-- pm2 (`npm install -g pm2`)
+---
 
-### Install & Run
+## Tech Stack
 
-```bash
-# Clone the repo
-git clone https://github.com/Jabito/claude-flightdeck.git
-cd claude-flightdeck
-# Deploy (installs deps, builds client, starts via pm2)
-bash deploy.sh
-
-# Open in browser
-open http://localhost:3001
-```
-
-### Other deploy commands
-
-```bash
-bash deploy.sh             # Build + start/restart (default)
-bash deploy.sh restart     # Rebuild and restart
-bash deploy.sh stop        # Stop the server
-bash deploy.sh status      # Show pm2 process info
-bash deploy.sh logs        # Tail logs (add number for line count: logs 100)
-bash deploy.sh delete      # Remove from pm2 entirely
-```
-
-### Development Mode
-
-```bash
-npm install
-cd client && npm install && cd ..
-npm run dev    # Starts backend with nodemon + Vite dev server concurrently
-```
+| Layer | Technology |
+|---|---|
+| Backend | Node.js + Express |
+| Frontend | React 18 + Vite 5 |
+| Editor | Monaco Editor |
+| Graph | ReactFlow |
+| Streaming | Server-Sent Events (SSE) |
+| Process Manager | pm2 |
 
 ---
 
@@ -194,6 +260,15 @@ Default port is `3001`. Override via environment variable:
 ```bash
 PORT=4000 bash deploy.sh
 ```
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Cmd/Ctrl+1` | Switch to Workspace |
+| `Cmd/Ctrl+2` | Switch to Execute |
 
 ---
 

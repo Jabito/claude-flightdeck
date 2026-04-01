@@ -57,8 +57,14 @@ const NODE_H_EXPANDED = 96;
 const NODE_GAP = 10;
 const DOMAIN_HEADER_H = 28;
 const DOMAIN_GAP = 24;
-const GRID_ROWS = 2;    // rows per domain band in folder view
+const MAX_COLS   = 10;  // max columns before wrapping to more rows
 const TYPE_GAP  = 14;   // horizontal gap between type groups
+
+/** Compute grid rows dynamically so columns never exceed MAX_COLS */
+function gridRows(count) {
+  if (count <= MAX_COLS) return 1;                       // single row when few items
+  return Math.ceil(count / MAX_COLS);                    // grow rows to cap columns
+}
 
 // Edge label → filter key
 function edgeLabel(e) {
@@ -180,7 +186,8 @@ function buildLayout(rawNodes, rawEdges, expanded) {
     if (catNodes.length === 0) continue;
 
     const meta = CATEGORY_META[category];
-    const cols = Math.ceil(catNodes.length / GRID_ROWS);
+    const rows = gridRows(catNodes.length);
+    const cols = Math.ceil(catNodes.length / rows);
     const sectionWidth = cols * cellW + 20;
 
     // Section header (large style)
@@ -194,10 +201,10 @@ function buildLayout(rawNodes, rawEdges, expanded) {
     });
     currentY += SECTION_HEADER_H + 10;
 
-    // 2-row grid, expands horizontally
+    // Dynamic-row grid, capped at MAX_COLS wide
     catNodes.forEach((n, i) => {
-      const col = Math.floor(i / GRID_ROWS);
-      const row = i % GRID_ROWS;
+      const col = Math.floor(i / rows);
+      const row = i % rows;
       resultNodes.push({
         id: n.id,
         type: 'claudeNode',
@@ -207,7 +214,7 @@ function buildLayout(rawNodes, rawEdges, expanded) {
       });
     });
 
-    currentY += GRID_ROWS * cellH + DOMAIN_GAP + 12;
+    currentY += rows * cellH + DOMAIN_GAP + 12;
   }
 
   return { nodes: resultNodes, edges: buildEdges(rawEdges) };
@@ -282,12 +289,15 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
 
     // Lay out categories left-to-right in display order
     let x = 0;
+    let maxRows = 1;
     const catLayout = {};
     CATEGORIES.forEach(cat => {
       const catNodes = catMap[cat] || [];
       if (catNodes.length === 0) return;
-      const cols = Math.ceil(catNodes.length / GRID_ROWS);
-      catLayout[cat] = { nodes: catNodes, startX: x };
+      const rows = gridRows(catNodes.length);
+      const cols = Math.ceil(catNodes.length / rows);
+      catLayout[cat] = { nodes: catNodes, startX: x, rows };
+      if (rows > maxRows) maxRows = rows;
       x += cols * cellW + TYPE_GAP;
     });
     const domainWidth = Math.max(x - TYPE_GAP + 20, 200);
@@ -302,10 +312,10 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
     });
     currentY += DOMAIN_HEADER_H + 8;
 
-    Object.values(catLayout).forEach(({ nodes: catNodes, startX }) => {
+    Object.values(catLayout).forEach(({ nodes: catNodes, startX, rows }) => {
       catNodes.forEach((n, i) => {
-        const col = Math.floor(i / GRID_ROWS);
-        const row = i % GRID_ROWS;
+        const col = Math.floor(i / rows);
+        const row = i % rows;
         resultNodes.push({
           id: n.id,
           type: 'claudeNode',
@@ -316,8 +326,8 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
       });
     });
 
-    // Band height is always exactly GRID_ROWS tall regardless of node count
-    currentY += GRID_ROWS * cellH + DOMAIN_GAP;
+    // Band height matches tallest category in this domain
+    currentY += maxRows * cellH + DOMAIN_GAP;
     domainIdx++;
   }
 

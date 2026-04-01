@@ -218,6 +218,22 @@ function parseRelationships() {
     }
   } catch {}
 
+  // ── Hook scripts from ~/.claude/hooks/ directory
+  const hooksDir = path.join(CLAUDE_DIR, 'hooks');
+  try {
+    const hookFiles = fs.readdirSync(hooksDir, { withFileTypes: true });
+    hookFiles
+      .filter(e => e.isFile() && !e.name.startsWith('.'))
+      .forEach(entry => {
+        const hookPath = path.join(hooksDir, entry.name);
+        const label = entry.name.replace(/\.[^.]+$/, ''); // strip extension
+        const id = `hook:file:${entry.name}`;
+        if (!nodes.find(n => n.id === id)) {
+          nodes.push({ id, type: 'hook', label, path: hookPath, command: entry.name });
+        }
+      });
+  } catch {}
+
   // ── Parse references in agent and command files
   const edgeSet = new Set();
 
