@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getProjects, deleteProject, getFile } from '../api.js';
+import { getProjects, deleteProject, getFile, getProjectConfig, saveProjectConfig } from '../api.js';
 
 const BTN = (extra = {}) => ({
   border: 'none',
@@ -35,7 +35,6 @@ function ScopePanel({ project }) {
     </div>
   );
 
-  // Show first ~40 lines of CLAUDE.md, trimmed
   const lines = content.split('\n');
   const preview = lines.slice(0, 40).join('\n');
   const truncated = lines.length > 40;
@@ -69,10 +68,18 @@ export default function ProjectsManager() {
   const [deleting, setDeleting] = useState(null);
   const [toast, setToast] = useState(null);
   const [search, setSearch] = useState('');
+  const [claudeOnly, setClaudeOnly] = useState(true);
+  const [customPaths, setCustomPaths] = useState([]);
+  const [newPath, setNewPath] = useState('');
+  const [savingConfig, setSavingConfig] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setProjects(await getProjects()); } catch {}
+    try {
+      const [projs, cfg] = await Promise.all([getProjects(), getProjectConfig()]);
+      setProjects(projs);
+      setCustomPaths(cfg.customPaths || []);
+    } catch {}
     setLoading(false);
   }, []);
 
@@ -108,21 +115,54 @@ export default function ProjectsManager() {
     setDeleting(null);
   };
 
+  const handleAddCustomPath = async () => {
+    const trimmed = newPath.trim();
+    if (!trimmed || customPaths.includes(trimmed)) return;
+    const updated = [...customPaths, trimmed];
+    setSavingConfig(true);
+    try {
+      await saveProjectConfig({ customPaths: updated });
+      setCustomPaths(updated);
+      setNewPath('');
+      await load();
+      showToast(`Added custom path: ${trimmed}`);
+    } catch (e) {
+      showToast(e.message, true);
+    }
+    setSavingConfig(false);
+  };
+
+  const handleRemoveCustomPath = async (p) => {
+    const updated = customPaths.filter(cp => cp !== p);
+    setSavingConfig(true);
+    try {
+      await saveProjectConfig({ customPaths: updated });
+      setCustomPaths(updated);
+      await load();
+    } catch (e) {
+      showToast(e.message, true);
+    }
+    setSavingConfig(false);
+  };
+
   const toggleExpand = (path) => setExpanded(prev => prev === path ? null : path);
 
-  const filtered = projects.filter(p =>
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.path.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = projects.filter(p => {
+    if (claudeOnly && !p.hasClaudeMd) return false;
+    if (search && !p.name.toLowerCase().includes(search.toLowerCase()) && !p.path.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const claudeCount = projects.filter(p => p.hasClaudeMd).length;
 
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: 20, boxSizing: 'border-box' }}>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>Projects</div>
           <div style={{ fontSize: 11, color: '#8b949e', marginTop: 2 }}>
-            {loading ? 'Loading…' : `${projects.length} project${projects.length !== 1 ? 's' : ''} discovered`}
+            {loading ? 'Loading…' : `${filtered.length} of ${projects.length} project${projects.length !== 1 ? 's' : ''}`}
           </div>
         </div>
         <div style={{ flex: 1 }} />
@@ -132,7 +172,7 @@ export default function ProjectsManager() {
           placeholder="Filter…"
           style={{
             background: '#0d1117', border: '1px solid #30363d', borderRadius: 6,
-            color: '#e6edf3', fontSize: 12, padding: '5px 10px', width: 180, outline: 'none'
+            color: '#e6edf3', fontSize: 12, padding: '5px 10px', width: 160, outline: 'none'
           }}
         />
         <button
@@ -141,6 +181,72 @@ export default function ProjectsManager() {
         >
           ↺ Refresh
         </button>
+      </div>
+
+      {/* Filter toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+          <div
+            onClick={() => setClaudeOnly(v => !v)}
+            style={{
+              width: 32, height: 18, borderRadius: 9, position: 'relative', transition: 'background 0.15s',
+              background: claudeOnly ? '#1f6feb' : '#30363d', cursor: 'pointer',
+            }}
+          >
+            <div style={{
+              position: 'absolute', top: 2, left: claudeOnly ? 16 : 2,
+              width: 14, height: 14, borderRadius: '50%', background: '#fff',
+              transition: 'left 0.15s',
+            }} />
+          </div>
+          <span style={{ fontSize: 12, color: '#8b949e' }}>
+            CLAUDE.md only
+            {!claudeOnly && <span style={{ color: '#484f58', marginLeft: 4 }}>({claudeCount} with CLAUDE.md)</span>}
+          </span>
+        </label>
+      </div>
+
+      {/* Custom paths section */}
+      <div style={{ marginBottom: 16, background: '#161b22', border: '1px solid #21262d', borderRadius: 8, padding: '12px 14px' }}>
+        <div style={{ fontSize: 11, color: '#484f58', textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 8 }}>
+          Custom Paths
+        </div>
+        {customPaths.length === 0 && (
+          <div style={{ fontSize: 11, color: '#484f58', fontStyle: 'italic', marginBottom: 8 }}>
+            No custom paths added yet.
+          </div>
+        )}
+        {customPaths.map(cp => (
+          <div key={cp} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: '#8b949e', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cp}</span>
+            <button
+              onClick={() => handleRemoveCustomPath(cp)}
+              disabled={savingConfig}
+              style={BTN({ background: 'transparent', color: '#f85149', border: '1px solid #6e2828', padding: '2px 8px' })}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          <input
+            value={newPath}
+            onChange={e => setNewPath(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddCustomPath()}
+            placeholder="/absolute/path/to/project"
+            style={{
+              flex: 1, background: '#0d1117', border: '1px solid #30363d', borderRadius: 6,
+              color: '#e6edf3', fontSize: 12, padding: '5px 10px', outline: 'none',
+            }}
+          />
+          <button
+            onClick={handleAddCustomPath}
+            disabled={savingConfig || !newPath.trim()}
+            style={BTN({ background: newPath.trim() ? '#1f6feb' : '#21262d', color: newPath.trim() ? '#fff' : '#484f58', border: '1px solid #30363d' })}
+          >
+            Add
+          </button>
+        </div>
       </div>
 
       {/* Toast */}
@@ -160,7 +266,7 @@ export default function ProjectsManager() {
         <div style={{ color: '#8b949e', fontSize: 13 }}>Loading projects…</div>
       ) : filtered.length === 0 ? (
         <div style={{ color: '#8b949e', fontSize: 13 }}>
-          {search ? 'No projects match your filter.' : 'No projects found.'}
+          {search || claudeOnly ? 'No projects match your filter.' : 'No projects found.'}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -180,10 +286,8 @@ export default function ProjectsManager() {
                 }}
                   onClick={() => toggleExpand(p.path)}
                 >
-                  {/* Chevron */}
                   <span style={{ fontSize: 10, color: '#484f58', flexShrink: 0, transition: 'transform 0.15s', transform: isOpen ? 'rotate(90deg)' : 'none', display: 'inline-block' }}>▶</span>
 
-                  {/* Icon */}
                   <div style={{
                     width: 30, height: 30, borderRadius: 7,
                     background: p.hasClaudeMd ? '#0d2a4a' : '#1c2128',
@@ -194,7 +298,6 @@ export default function ProjectsManager() {
                     {p.hasClaudeMd ? '◈' : '◻'}
                   </div>
 
-                  {/* Info */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 600, color: '#e6edf3' }}>{p.name}</span>
@@ -206,6 +309,14 @@ export default function ProjectsManager() {
                           CLAUDE.md
                         </span>
                       )}
+                      {p.custom && (
+                        <span style={{
+                          fontSize: 10, background: '#2d1a00', color: '#f0883e',
+                          borderRadius: 4, padding: '1px 6px', border: '1px solid #6e3800'
+                        }}>
+                          custom
+                        </span>
+                      )}
                     </div>
                     <div style={{
                       fontSize: 11, color: '#8b949e', marginTop: 2,
@@ -215,7 +326,6 @@ export default function ProjectsManager() {
                     </div>
                   </div>
 
-                  {/* Actions — stop click propagation so expand doesn't fire */}
                   <div onClick={e => e.stopPropagation()}>
                     {confirming === p.path ? (
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
@@ -253,7 +363,6 @@ export default function ProjectsManager() {
                   </div>
                 </div>
 
-                {/* Expanded scope panel */}
                 {isOpen && (
                   <div style={{ padding: '0 14px 14px', borderTop: '1px solid #21262d' }}>
                     <div style={{ fontSize: 10, color: '#484f58', textTransform: 'uppercase', letterSpacing: 0.7, padding: '10px 0 6px' }}>
