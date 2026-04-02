@@ -586,17 +586,54 @@ app.get('/api/bitbucket-repos', async (_req, res) => {
   }
 });
 
+// ─── Project config persistence (custom paths) ───────────────────────────────
+
+const PROJECT_CONFIG_FILE = path.join(__dirname, 'project-config.json');
+
+function loadProjectConfig() {
+  try { return JSON.parse(fs.readFileSync(PROJECT_CONFIG_FILE, 'utf8')); } catch { return { customPaths: [] }; }
+}
+
+function saveProjectConfig(cfg) {
+  try { fs.writeFileSync(PROJECT_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
+}
+
+app.get('/api/project-config', (_req, res) => res.json(loadProjectConfig()));
+
+app.post('/api/project-config', (req, res) => {
+  const cfg = loadProjectConfig();
+  const { customPaths } = req.body;
+  if (Array.isArray(customPaths)) cfg.customPaths = customPaths.filter(p => typeof p === 'string' && p.trim());
+  saveProjectConfig(cfg);
+  res.json(cfg);
+});
+
 app.get('/api/projects', (_req, res) => {
-  const searchBases = [
+  const defaultBases = [
     path.join(os.homedir(), 'Documents/Repos'),
     path.join(os.homedir(), 'Projects'),
     path.join(os.homedir(), 'code'),
     path.join(os.homedir(), 'dev'),
     os.homedir()
   ];
+  const { customPaths = [] } = loadProjectConfig();
+  const searchBases = [...defaultBases, ...customPaths];
   const projects = [];
   const seen = new Set();
-  searchBases.forEach(base => {
+  searchBases.forEach((base, idx) => {
+    const isCustom = idx >= defaultBases.length;
+    try {
+      // Custom paths can be added as direct project directories or parent directories
+      const stat = fs.statSync(base);
+      if (isCustom && stat.isDirectory() && fs.existsSync(path.join(base, 'CLAUDE.md'))) {
+        // Treat the custom path itself as a project if it has CLAUDE.md
+        if (!seen.has(base)) {
+          seen.add(base);
+          projects.push({ name: path.basename(base), path: base, hasClaudeMd: true, custom: true });
+        }
+        return;
+      }
+    } catch {}
     try {
       fs.readdirSync(base, { withFileTypes: true })
         .filter(e => e.isDirectory() && !e.name.startsWith('.'))
@@ -854,8 +891,11 @@ app.get('/api/run-claude/:runId/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  // Replay all buffered output
-  for (const data of runRecord.output) {
+  // Allow caller to skip already-seen events (e.g. new tab that loaded run history)
+  const from = parseInt(req.query.from, 10) || 0;
+
+  // Replay buffered output from the requested offset
+  for (const data of runRecord.output.slice(from)) {
     if (res.writableEnded) return;
     try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { return; }
   }

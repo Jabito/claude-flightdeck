@@ -70,6 +70,20 @@ export async function getProjects() {
   return r.json();
 }
 
+export async function getProjectConfig() {
+  const r = await fetch(`${BASE}/project-config`);
+  return r.json();
+}
+
+export async function saveProjectConfig(cfg) {
+  const r = await fetch(`${BASE}/project-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  return r.json();
+}
+
 export async function deleteProject(projectPath) {
   const r = await fetch(`${BASE}/projects`, {
     method: 'DELETE',
@@ -135,10 +149,12 @@ export async function deleteCommandRun(id) {
   return r.json();
 }
 
-// Reconnect to an in-progress (or finished) run and replay its output
-export function streamRun(runId, onData) {
+// Reconnect to an in-progress (or finished) run and replay its output.
+// Pass fromIndex to skip events the caller already has (e.g. loaded via getCommandRuns).
+export function streamRun(runId, onData, fromIndex = 0) {
   let cancel = () => {};
-  const promise = fetch(`${BASE}/run-claude/${runId}/stream`).then(response => {
+  const url = fromIndex > 0 ? `${BASE}/run-claude/${runId}/stream?from=${fromIndex}` : `${BASE}/run-claude/${runId}/stream`;
+  const promise = fetch(url).then(response => {
     const reader = response.body.getReader();
     cancel = () => reader.cancel();
     const decoder = new TextDecoder();

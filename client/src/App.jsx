@@ -80,6 +80,7 @@ export default function App() {
       setRuns(history);
       // Reconnect to any processes that were still running before the page loaded
       history.filter(r => r.status === 'running').forEach(run => {
+        // Pass current output length so stream replay skips events we already have
         const { cancel } = streamRun(run.id, (data) => {
           if (data.type === 'done') {
             updateRun(run.id, {
@@ -92,7 +93,7 @@ export default function App() {
           } else {
             appendRunOutput(run.id, { ...data, receivedAt: Date.now() });
           }
-        });
+        }, run.output?.length ?? 0);
         updateRun(run.id, { cancel });
       });
     }).catch(() => {});
