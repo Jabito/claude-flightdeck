@@ -19,12 +19,13 @@ const NODE_COLORS = {
 };
 
 // Display categories (used for layout ordering and colour in both views)
-const CATEGORIES      = ['command', 'orchestrator', 'agent', 'skill', 'other'];
+const CATEGORIES      = ['command', 'orchestrator', 'agent', 'skill', 'hook', 'other'];
 const CATEGORY_META   = {
   command:      { label: 'Commands',      color: '#1f6feb' },
   orchestrator: { label: 'Orchestrators', color: '#db61a2' },
   agent:        { label: 'Agents',        color: '#a371f7' },
   skill:        { label: 'Skills',        color: '#2ea043' },
+  hook:         { label: 'Hooks',         color: '#d29922' },
   other:        { label: 'Others',        color: '#8b949e' },
 };
 const SECTION_HEADER_H = 42; // taller than domain header (28px)
@@ -39,7 +40,8 @@ function getCategory(node, orchestratorIds) {
   if (node.type === 'command') return 'command';
   if (node.type === 'agent')   return orchestratorIds.has(node.id) ? 'orchestrator' : 'agent';
   if (node.type === 'skill')   return 'skill';
-  return 'other'; // hook, service
+  if (node.type === 'hook')    return 'hook';
+  return 'other'; // service, etc.
 }
 
 const SERVICE_COLORS = {
@@ -60,10 +62,10 @@ const DOMAIN_GAP = 24;
 const MAX_COLS   = 10;  // max columns before wrapping to more rows
 const TYPE_GAP  = 14;   // horizontal gap between type groups
 
-/** Compute grid rows dynamically so columns never exceed MAX_COLS */
-function gridRows(count) {
-  if (count <= MAX_COLS) return 1;                       // single row when few items
-  return Math.ceil(count / MAX_COLS);                    // grow rows to cap columns
+/** Compute grid rows dynamically so columns never exceed maxCols */
+function gridRows(count, maxCols = MAX_COLS) {
+  if (count <= maxCols) return 1;
+  return Math.ceil(count / maxCols);
 }
 
 // Edge label → filter key
@@ -234,6 +236,17 @@ function DomainHeaderNode({ data }) {
       </div>
     );
   }
+  // Category sub-label for Folder view (inside a domain)
+  if (data.sub) {
+    return (
+      <div style={{ width: data.width || 400, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 9, fontWeight: 600, color: data.color || '#484f58', textTransform: 'uppercase', letterSpacing: 1 }}>
+          {data.label}
+        </span>
+        <span style={{ fontSize: 9, color: '#30363d' }}>{data.count}</span>
+      </div>
+    );
+  }
   // Domain header for Folder view
   return (
     <div style={{
@@ -253,6 +266,10 @@ function DomainHeaderNode({ data }) {
 
 const DOMAIN_COLORS = ['#a371f7', '#1f6feb', '#2ea043', '#d29922', '#e36209', '#f85149', '#79c0ff', '#56d364'];
 
+const MAX_FOLDER_COLS = 5;
+const CAT_HEADER_H    = 20;
+const CAT_GAP         = 8;
+
 function buildGroupedLayout(rawNodes, rawEdges, expanded) {
   const nodeH = expanded ? NODE_H_EXPANDED : NODE_H_COMPACT;
   const nodeW = expanded ? NODE_W_EXPANDED : NODE_W_COMPACT;
@@ -271,10 +288,10 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
     m[cat].push({ ...n, displayCategory: cat });
   });
 
-  // Alphabetical, 'other' last
+  // Alphabetical, 'other' first
   const sortedDomains = [...domainMap.keys()].sort((a, b) => {
-    if (a === 'other') return 1;
-    if (b === 'other') return -1;
+    if (a === 'other') return -1;
+    if (b === 'other') return 1;
     return a.localeCompare(b);
   });
 
@@ -287,21 +304,15 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
     const domainColor = DOMAIN_COLORS[domainIdx % DOMAIN_COLORS.length];
     const nodeCount = Object.values(catMap).reduce((s, arr) => s + arr.length, 0);
 
-    // Lay out categories left-to-right in display order
-    let x = 0;
-    let maxRows = 1;
-    const catLayout = {};
+    // Compute domain width from widest category (≤ MAX_FOLDER_COLS cols)
+    let maxCols = 1;
     CATEGORIES.forEach(cat => {
-      const catNodes = catMap[cat] || [];
-      if (catNodes.length === 0) return;
-      const rows = gridRows(catNodes.length);
-      const cols = Math.ceil(catNodes.length / rows);
-      catLayout[cat] = { nodes: catNodes, startX: x, rows };
-      if (rows > maxRows) maxRows = rows;
-      x += cols * cellW + TYPE_GAP;
+      const len = (catMap[cat] || []).length;
+      if (len > 0) maxCols = Math.max(maxCols, Math.min(len, MAX_FOLDER_COLS));
     });
-    const domainWidth = Math.max(x - TYPE_GAP + 20, 200);
+    const domainWidth = Math.max(maxCols * cellW - 12 + 20, 200);
 
+    // Domain header
     resultNodes.push({
       id: `__header_${domain}`,
       type: 'domainHeader',
@@ -312,22 +323,42 @@ function buildGroupedLayout(rawNodes, rawEdges, expanded) {
     });
     currentY += DOMAIN_HEADER_H + 8;
 
-    Object.values(catLayout).forEach(({ nodes: catNodes, startX, rows }) => {
+    // Categories stacked top-to-bottom
+    CATEGORIES.forEach(cat => {
+      const catNodes = catMap[cat] || [];
+      if (catNodes.length === 0) return;
+      const meta = CATEGORY_META[cat];
+      const cols = Math.min(catNodes.length, MAX_FOLDER_COLS);
+      const rows = Math.ceil(catNodes.length / cols);
+
+      // Category sub-label
+      resultNodes.push({
+        id: `__cat_${domain}_${cat}`,
+        type: 'domainHeader',
+        position: { x: 0, y: currentY },
+        data: { label: meta.label, color: meta.color, count: catNodes.length, width: domainWidth, sub: true },
+        draggable: false, selectable: false,
+        style: { padding: 0, background: 'transparent', border: 'none', pointerEvents: 'none' }
+      });
+      currentY += CAT_HEADER_H + 4;
+
+      // Nodes left-to-right, wrapping into rows
       catNodes.forEach((n, i) => {
-        const col = Math.floor(i / rows);
-        const row = i % rows;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
         resultNodes.push({
           id: n.id,
           type: 'claudeNode',
-          position: { x: startX + col * cellW, y: currentY + row * cellH },
+          position: { x: col * cellW, y: currentY + row * cellH },
           data: { raw: n, dimmed: false, highlighted: false, selected: false, expanded },
           style: { padding: 0, background: 'transparent', border: 'none' }
         });
       });
+
+      currentY += rows * cellH + CAT_GAP;
     });
 
-    // Band height matches tallest category in this domain
-    currentY += maxRows * cellH + DOMAIN_GAP;
+    currentY += DOMAIN_GAP;
     domainIdx++;
   }
 
@@ -533,8 +564,8 @@ function Toolbar({ search, onSearch, count, total, expanded, onToggleExpanded, v
       {/* View mode toggle */}
       <div style={{ display: 'flex', background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, overflow: 'hidden' }}>
         {[
-          { key: 'folder', label: '⬡ Folder' },
-          { key: 'type',   label: '⊞ Type' }
+          { key: 'type',   label: '⊞ Type' },
+          { key: 'folder', label: '⬡ Folder' }
         ].map(({ key, label }) => (
           <button
             key={key}
