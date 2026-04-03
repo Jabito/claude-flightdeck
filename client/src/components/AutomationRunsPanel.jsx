@@ -30,15 +30,17 @@ function formatRunTime(isoString) {
 }
 
 async function fetchAllRuns() {
-  const [webhookRuns, pollRuns, scheduleRuns] = await Promise.all([
+  const [webhookRuns, pollRuns, scheduleRuns, workflowRuns] = await Promise.all([
     fetch('/api/webhooks/runs').then(r => r.json()).catch(() => []),
     fetch('/api/polls/runs').then(r => r.json()).catch(() => []),
-    fetch('/api/schedules/runs').then(r => r.json()).catch(() => [])
+    fetch('/api/schedules/runs').then(r => r.json()).catch(() => []),
+    fetch('/api/workflow-runs').then(r => r.json()).catch(() => [])
   ]);
   const wh = (Array.isArray(webhookRuns) ? webhookRuns : []).map(r => ({ ...r, source: r.source || 'webhook' }));
   const pr = (Array.isArray(pollRuns) ? pollRuns : []).map(r => ({ ...r, source: 'poll' }));
   const sc = (Array.isArray(scheduleRuns) ? scheduleRuns : []).map(r => ({ ...r, source: 'schedule' }));
-  return [...wh, ...pr, ...sc].sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+  const wf = (Array.isArray(workflowRuns) ? workflowRuns : []).map(r => ({ ...r, source: 'workflow', execId: r.execId }));
+  return [...wh, ...pr, ...sc, ...wf].sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
 }
 
 export default function AutomationRunsPanel() {
@@ -235,10 +237,11 @@ export default function AutomationRunsPanel() {
                     </button>
                   ) : (
                     <span style={{
-                      fontSize: 9, color: run.source === 'poll' ? '#d2a679' : run.source === 'schedule' ? '#a371f7' : '#8b949e',
+                      fontSize: 9,
+                      color: run.source === 'poll' ? '#d2a679' : run.source === 'schedule' ? '#a371f7' : run.source === 'workflow' ? '#79c0ff' : '#8b949e',
                       background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '1px 4px', flexShrink: 0
                     }}>
-                      {run.source === 'poll' ? '⏱' : run.source === 'schedule' ? '⏰' : '⚡'}
+                      {run.source === 'poll' ? '⏱' : run.source === 'schedule' ? '⏰' : run.source === 'workflow' ? '⇉' : '⚡'}
                     </span>
                   )}
                 </div>
@@ -270,11 +273,17 @@ export default function AutomationRunsPanel() {
                 {statusIcon(selected.status)} {selected.status}
               </span>
               <span style={{
-                fontSize: 9, color: selected.source === 'poll' ? '#d2a679' : selected.source === 'schedule' ? '#a371f7' : '#8b949e',
+                fontSize: 9,
+                color: selected.source === 'poll' ? '#d2a679' : selected.source === 'schedule' ? '#a371f7' : selected.source === 'workflow' ? '#79c0ff' : '#8b949e',
                 background: '#0d1117', border: '1px solid #30363d', borderRadius: 3, padding: '2px 6px'
               }}>
-                {selected.source === 'poll' ? '⏱ Poll' : selected.source === 'schedule' ? '⏰ Schedule' : '⚡ Webhook'}
+                {selected.source === 'poll' ? '⏱ Poll' : selected.source === 'schedule' ? '⏰ Schedule' : selected.source === 'workflow' ? '⇉ Workflow' : '⚡ Webhook'}
               </span>
+              {selected.source === 'workflow' && selected.status === 'running' && (
+                <span style={{ fontSize: 10, color: '#484f58' }}>
+                  step {(selected.currentStep ?? 0) + 1} / {selected.totalSteps ?? '?'}
+                </span>
+              )}
               <span style={{ fontSize: 12, color: '#e6edf3', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {runName(selected)}
               </span>
@@ -320,6 +329,13 @@ export default function AutomationRunsPanel() {
               style={{ flex: 1, overflow: 'auto', padding: '10px 14px', fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace", fontSize: 12, lineHeight: 1.6 }}
             >
               {selected.output.map((line, i) => {
+                if (line.type === 'step_separator') return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 6px', color: '#484f58', fontSize: 10 }}>
+                    <div style={{ flex: 1, height: 1, background: '#21262d' }} />
+                    <span>{line.message}</span>
+                    <div style={{ flex: 1, height: 1, background: '#21262d' }} />
+                  </div>
+                );
                 if (line.type === 'ask_user') return (
                   <div key={i} style={{ margin: '6px 0', padding: '8px 12px', borderRadius: 4, background: '#161b22', border: '1px solid #f0883e' }}>
                     <div style={{ color: '#f0883e', fontWeight: 600, fontSize: 11, marginBottom: 4 }}>⏸ Claude is asking:</div>

@@ -3,6 +3,7 @@ import {
   getProjects, getCommands,
   getSchedules, createSchedule, updateSchedule, deleteSchedule, runScheduleNow,
   getPolls, createPoll, updatePoll, deletePoll, testPoll,
+  getWorkflows,
 } from '../api.js';
 
 const INTERVAL_PRESETS = [
@@ -16,7 +17,7 @@ const INTERVAL_PRESETS = [
 ];
 
 const BLANK_FORM = {
-  sourceType: 'prompt',  // 'prompt' | 'jira' | 'bitbucket'
+  sourceType: 'prompt',  // 'prompt' | 'jira' | 'bitbucket' | 'workflow'
   name: '', enabled: true, intervalMinutes: 30,
   // prompt fields
   command: '', args: '', freePrompt: '',
@@ -24,6 +25,8 @@ const BLANK_FORM = {
   jqlFilter: '', maxPerRun: 5, argTemplate: '{{key}}',
   // bitbucket fields
   bbRepo: '', bbBranch: 'main',
+  // workflow fields
+  workflowId: '', workflowArgs: '',
   // shared
   projectPath: '', allowPermissions: true,
 };
@@ -58,6 +61,7 @@ export default function ScheduleManager({ onViewRuns }) {
   const [items, setItems] = useState([]);   // merged polls + schedules
   const [projects, setProjects] = useState([]);
   const [commands, setCommands] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const [editingType, setEditingType] = useState(null);  // 'poll' | 'schedule' | null
   const [form, setForm] = useState(BLANK_FORM);
@@ -82,6 +86,7 @@ export default function ScheduleManager({ onViewRuns }) {
     load();
     getProjects().then(setProjects).catch(() => {});
     getCommands().then(setCommands).catch(() => {});
+    getWorkflows().then(setWorkflows).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -100,7 +105,7 @@ export default function ScheduleManager({ onViewRuns }) {
   const openEdit = (item) => {
     const sourceType = item._type === 'poll'
       ? (item.sourceType === 'bitbucket' ? 'bitbucket' : 'jira')
-      : 'prompt';
+      : (item.sourceType === 'workflow' ? 'workflow' : 'prompt');
     setForm({ ...BLANK_FORM, ...item, sourceType });
     setEditingId(item.id);
     setEditingType(item._type);
@@ -132,6 +137,16 @@ export default function ScheduleManager({ onViewRuns }) {
         };
         if (editingId === 'new') await createPoll(payload);
         else await updatePoll(editingId, payload);
+      } else if (form.sourceType === 'workflow') {
+        if (!form.name || !form.workflowId) return;
+        const payload = {
+          sourceType: 'workflow',
+          name: form.name, enabled: form.enabled, intervalMinutes: form.intervalMinutes,
+          workflowId: form.workflowId, workflowArgs: form.workflowArgs || '',
+          allowPermissions: form.allowPermissions,
+        };
+        if (editingId === 'new') await createSchedule(payload);
+        else await updateSchedule(editingId, payload);
       } else {
         const prompt = form.command
           ? (form.args?.trim() ? `/${form.command} ${form.args.trim()}` : `/${form.command}`)
@@ -193,10 +208,11 @@ export default function ScheduleManager({ onViewRuns }) {
     ? (form.args?.trim() ? `/${form.command} ${form.args.trim()}` : `/${form.command}`)
     : form.freePrompt?.trim();
 
-  const canSave = !saving && !!form.name && !!form.projectPath && (
-    form.sourceType === 'jira'       ? !!form.jqlFilter && !!form.command
-    : form.sourceType === 'bitbucket' ? !!form.bbRepo && !!form.command
-    : !!effectivePrompt
+  const canSave = !saving && !!form.name && (
+    form.sourceType === 'jira'       ? !!form.projectPath && !!form.jqlFilter && !!form.command
+    : form.sourceType === 'bitbucket' ? !!form.projectPath && !!form.bbRepo && !!form.command
+    : form.sourceType === 'workflow'  ? !!form.workflowId
+    : !!form.projectPath && !!effectivePrompt
   );
 
   return (
@@ -292,6 +308,17 @@ export default function ScheduleManager({ onViewRuns }) {
                 >
                   {form.sourceType === 'bitbucket' ? '▼ Bitbucket enabled' : '▶ Enable Bitbucket'}
                 </button>
+                <button
+                  onClick={() => setForm(f => ({ ...f, sourceType: f.sourceType === 'workflow' ? 'prompt' : 'workflow' }))}
+                  style={{
+                    fontSize: 11, cursor: 'pointer', padding: '5px 12px', borderRadius: 6,
+                    background: form.sourceType === 'workflow' ? '#1a2d4a' : '#0d1117',
+                    color: form.sourceType === 'workflow' ? '#79c0ff' : '#484f58',
+                    border: `1px solid ${form.sourceType === 'workflow' ? '#1f6feb' : '#30363d'}`,
+                  }}
+                >
+                  {form.sourceType === 'workflow' ? '▼ Workflow enabled' : '▶ Enable Workflow'}
+                </button>
               </div>
 
               {/* JIRA-specific fields */}
@@ -338,133 +365,174 @@ export default function ScheduleManager({ onViewRuns }) {
                 </>
               )}
 
-              <Field label="Command">
-                <select
-                  style={inputStyle}
-                  value={form.command}
-                  onChange={e => setForm(f => ({ ...f, command: e.target.value, args: '', freePrompt: '' }))}
-                >
-                  {form.sourceType === 'prompt'
-                    ? <option value="">— Free prompt —</option>
-                    : <option value="">Select command…</option>
-                  }
-                  {Object.entries(commandsByDomain).map(([domain, cmds]) => (
-                    <optgroup key={domain} label={domain}>
-                      {cmds.map(cmd => (
-                        <option key={cmd.id} value={cmd.id}>/{cmd.id}</option>
+              {/* Workflow-specific fields */}
+              {form.sourceType === 'workflow' && (
+                <>
+                  <Field label="Workflow">
+                    <select
+                      style={inputStyle}
+                      value={form.workflowId}
+                      onChange={e => setForm(f => ({ ...f, workflowId: e.target.value }))}
+                    >
+                      <option value="">Select workflow…</option>
+                      {workflows.map(w => (
+                        <option key={w.id} value={w.id}>{w.name} ({w.steps?.length ?? 0} steps)</option>
                       ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </Field>
+                    </select>
+                  </Field>
+                  <Field label="Initial Args" hint="optional — passed as {{input.*}} tokens in first step" tip={[
+                    'Space-separated args passed to the first workflow step.',
+                    '',
+                    '#Example:',
+                    '• PROJ-123 env=staging',
+                    '',
+                    '#Access in step argsOverride:',
+                    '• {{input.arg0}} → PROJ-123',
+                    '• {{input.env}}  → staging',
+                  ]}>
+                    <input
+                      style={inputStyle}
+                      value={form.workflowArgs}
+                      onChange={e => setForm(f => ({ ...f, workflowArgs: e.target.value }))}
+                      placeholder="e.g. PROJ-123 env=staging"
+                    />
+                  </Field>
+                </>
+              )}
 
-              {form.sourceType === 'bitbucket' ? (
-                <Field label="Arg Template" hint="per-commit tokens" tip={[
-                  'Tokens are replaced with values from the triggering commit.',
-                  '',
-                  '#Available tokens:',
-                  '• {{shortHash}} — e.g. a1b2c3d4',
-                  '• {{hash}}      — full 40-char SHA',
-                  '• {{message}}   — first line of commit message',
-                  '• {{author}}    — committer display name',
-                  '• {{branch}}    — branch name',
-                  '• {{repo}}      — repository slug',
-                  '',
-                  '#Example:',
-                  '• {{shortHash}} {{message}}',
-                  '',
-                  '#Runs as (per new commit):',
-                  '• /dev:implement a1b2c3d4 Fix login bug',
-                ]}>
-                  <input
-                    style={inputStyle}
-                    value={form.argTemplate}
-                    onChange={e => setForm(f => ({ ...f, argTemplate: e.target.value }))}
-                    placeholder="{{shortHash}} {{message}}"
-                  />
-                  {form.argTemplate && form.command && (
-                    <div style={{ fontSize: 10, color: '#8b949e', marginTop: 3, fontFamily: 'monospace' }}>
-                      /{form.command} {form.argTemplate}
+              {form.sourceType !== 'workflow' && (
+                <>
+                  <Field label="Command">
+                    <select
+                      style={inputStyle}
+                      value={form.command}
+                      onChange={e => setForm(f => ({ ...f, command: e.target.value, args: '', freePrompt: '' }))}
+                    >
+                      {form.sourceType === 'prompt'
+                        ? <option value="">— Free prompt —</option>
+                        : <option value="">Select command…</option>
+                      }
+                      {Object.entries(commandsByDomain).map(([domain, cmds]) => (
+                        <optgroup key={domain} label={domain}>
+                          {cmds.map(cmd => (
+                            <option key={cmd.id} value={cmd.id}>/{cmd.id}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </Field>
+
+                  {form.sourceType === 'bitbucket' ? (
+                    <Field label="Arg Template" hint="per-commit tokens" tip={[
+                      'Tokens are replaced with values from the triggering commit.',
+                      '',
+                      '#Available tokens:',
+                      '• {{shortHash}} — e.g. a1b2c3d4',
+                      '• {{hash}}      — full 40-char SHA',
+                      '• {{message}}   — first line of commit message',
+                      '• {{author}}    — committer display name',
+                      '• {{branch}}    — branch name',
+                      '• {{repo}}      — repository slug',
+                      '',
+                      '#Example:',
+                      '• {{shortHash}} {{message}}',
+                      '',
+                      '#Runs as (per new commit):',
+                      '• /dev:implement a1b2c3d4 Fix login bug',
+                    ]}>
+                      <input
+                        style={inputStyle}
+                        value={form.argTemplate}
+                        onChange={e => setForm(f => ({ ...f, argTemplate: e.target.value }))}
+                        placeholder="{{shortHash}} {{message}}"
+                      />
+                      {form.argTemplate && form.command && (
+                        <div style={{ fontSize: 10, color: '#8b949e', marginTop: 3, fontFamily: 'monospace' }}>
+                          /{form.command} {form.argTemplate}
+                        </div>
+                      )}
+                    </Field>
+                  ) : form.sourceType === 'jira' ? (
+                    <Field label="Arg Template" hint="per-issue tokens" tip={[
+                      'Tokens are replaced with values from each matched JIRA issue.',
+                      '',
+                      '#Available tokens:',
+                      '• {{key}}      — e.g. PROJ-123',
+                      '• {{summary}}  — issue title',
+                      '• {{status}}   — e.g. Open, In Progress',
+                      '• {{assignee}} — display name',
+                      '• {{type}}     — e.g. Bug, Story, Task',
+                      '',
+                      '#Example:',
+                      '• {{key}} target="My Plan"',
+                      '',
+                      '#Runs as (per issue):',
+                      '• /dev:plan PROJ-123 target="My Plan"',
+                    ]}>
+                      <input
+                        style={inputStyle}
+                        value={form.argTemplate}
+                        onChange={e => setForm(f => ({ ...f, argTemplate: e.target.value }))}
+                        placeholder="{{key}}"
+                      />
+                      {form.argTemplate && form.command && (
+                        <div style={{ fontSize: 10, color: '#8b949e', marginTop: 3, fontFamily: 'monospace' }}>
+                          /{form.command} {form.argTemplate}
+                        </div>
+                      )}
+                    </Field>
+                  ) : form.command ? (
+                    <Field label="Arguments" hint="passed after the command" tip={[
+                      'Static text appended after the command when the schedule fires.',
+                      '',
+                      '#Example — command: /dev:implement',
+                      '• PROJ-123 Fix login page',
+                      '',
+                      '#Runs as:',
+                      '• /dev:implement PROJ-123 Fix login page',
+                    ]}>
+                      <input
+                        style={inputStyle}
+                        value={form.args}
+                        onChange={e => setForm(f => ({ ...f, args: e.target.value }))}
+                        placeholder="e.g. PROJ-123 or leave empty"
+                      />
+                    </Field>
+                  ) : (
+                    <Field label="Prompt">
+                      <textarea
+                        style={{ ...inputStyle, resize: 'vertical', minHeight: 72, fontFamily: 'inherit' }}
+                        value={form.freePrompt}
+                        onChange={e => setForm(f => ({ ...f, freePrompt: e.target.value }))}
+                        placeholder="Describe what Claude should do each run…"
+                      />
+                    </Field>
+                  )}
+
+                  {form.sourceType !== 'jira' && effectivePrompt && (
+                    <div style={{ fontSize: 11, color: '#8b949e', background: '#0d1117', padding: '5px 8px', borderRadius: 4, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                      {effectivePrompt}
                     </div>
                   )}
-                </Field>
-              ) : form.sourceType === 'jira' ? (
-                <Field label="Arg Template" hint="per-issue tokens" tip={[
-                  'Tokens are replaced with values from each matched JIRA issue.',
-                  '',
-                  '#Available tokens:',
-                  '• {{key}}      — e.g. PROJ-123',
-                  '• {{summary}}  — issue title',
-                  '• {{status}}   — e.g. Open, In Progress',
-                  '• {{assignee}} — display name',
-                  '• {{type}}     — e.g. Bug, Story, Task',
-                  '',
-                  '#Example:',
-                  '• {{key}} target="My Plan"',
-                  '',
-                  '#Runs as (per issue):',
-                  '• /dev:plan PROJ-123 target="My Plan"',
-                ]}>
+                </>
+              )}
+
+              {form.sourceType !== 'workflow' && (
+                <Field label="Project Path">
+                  <select style={inputStyle} value={form.projectPath} onChange={e => setForm(f => ({ ...f, projectPath: e.target.value }))}>
+                    <option value="">Select project…</option>
+                    {projects.map(p => (
+                      <option key={p.path} value={p.path}>{p.hasClaudeMd ? '◈ ' : ''}{p.name}</option>
+                    ))}
+                  </select>
                   <input
-                    style={inputStyle}
-                    value={form.argTemplate}
-                    onChange={e => setForm(f => ({ ...f, argTemplate: e.target.value }))}
-                    placeholder="{{key}}"
-                  />
-                  {form.argTemplate && form.command && (
-                    <div style={{ fontSize: 10, color: '#8b949e', marginTop: 3, fontFamily: 'monospace' }}>
-                      /{form.command} {form.argTemplate}
-                    </div>
-                  )}
-                </Field>
-              ) : form.command ? (
-                <Field label="Arguments" hint="passed after the command" tip={[
-                  'Static text appended after the command when the schedule fires.',
-                  '',
-                  '#Example — command: /dev:implement',
-                  '• PROJ-123 Fix login page',
-                  '',
-                  '#Runs as:',
-                  '• /dev:implement PROJ-123 Fix login page',
-                ]}>
-                  <input
-                    style={inputStyle}
-                    value={form.args}
-                    onChange={e => setForm(f => ({ ...f, args: e.target.value }))}
-                    placeholder="e.g. PROJ-123 or leave empty"
-                  />
-                </Field>
-              ) : (
-                <Field label="Prompt">
-                  <textarea
-                    style={{ ...inputStyle, resize: 'vertical', minHeight: 72, fontFamily: 'inherit' }}
-                    value={form.freePrompt}
-                    onChange={e => setForm(f => ({ ...f, freePrompt: e.target.value }))}
-                    placeholder="Describe what Claude should do each run…"
+                    style={{ ...inputStyle, marginTop: 4 }}
+                    value={form.projectPath}
+                    onChange={e => setForm(f => ({ ...f, projectPath: e.target.value }))}
+                    placeholder="or enter path manually…"
                   />
                 </Field>
               )}
-
-              {form.sourceType !== 'jira' && effectivePrompt && (
-                <div style={{ fontSize: 11, color: '#8b949e', background: '#0d1117', padding: '5px 8px', borderRadius: 4, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                  {effectivePrompt}
-                </div>
-              )}
-
-              <Field label="Project Path">
-                <select style={inputStyle} value={form.projectPath} onChange={e => setForm(f => ({ ...f, projectPath: e.target.value }))}>
-                  <option value="">Select project…</option>
-                  {projects.map(p => (
-                    <option key={p.path} value={p.path}>{p.hasClaudeMd ? '◈ ' : ''}{p.name}</option>
-                  ))}
-                </select>
-                <input
-                  style={{ ...inputStyle, marginTop: 4 }}
-                  value={form.projectPath}
-                  onChange={e => setForm(f => ({ ...f, projectPath: e.target.value }))}
-                  placeholder="or enter path manually…"
-                />
-              </Field>
 
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 11, color: '#8b949e' }}>
                 <input
@@ -494,13 +562,17 @@ export default function ScheduleManager({ onViewRuns }) {
           {items.map(item => {
             const isBitbucket = item._type === 'poll' && item.sourceType === 'bitbucket';
             const isJira = item._type === 'poll' && !isBitbucket;
+            const isWorkflow = item._type === 'schedule' && item.sourceType === 'workflow';
+            const wf = isWorkflow ? workflows.find(w => w.id === item.workflowId) : null;
             const displayPrompt = isBitbucket
               ? `${item.bbRepo}@${item.bbBranch || 'main'}`
               : isJira
                 ? item.jqlFilter
-                : (item.command
-                    ? (item.args?.trim() ? `/${item.command} ${item.args.trim()}` : `/${item.command}`)
-                    : item.freePrompt || '');
+                : isWorkflow
+                  ? (wf ? `⇉ ${wf.name}` : `⇉ workflow:${item.workflowId}`)
+                  : (item.command
+                      ? (item.args?.trim() ? `/${item.command} ${item.args.trim()}` : `/${item.command}`)
+                      : item.freePrompt || '');
             return (
               <div key={`${item._type}-${item.id}`} style={{
                 background: '#161b22',
@@ -518,6 +590,11 @@ export default function ScheduleManager({ onViewRuns }) {
                   {isJira && (
                     <span style={{ fontSize: 10, background: '#2d1a00', color: '#d2a679', border: '1px solid #6e3800', borderRadius: 4, padding: '1px 6px' }}>
                       JIRA
+                    </span>
+                  )}
+                  {isWorkflow && (
+                    <span style={{ fontSize: 10, background: '#1a2d4a', color: '#79c0ff', border: '1px solid #1f6feb', borderRadius: 4, padding: '1px 6px' }}>
+                      Workflow
                     </span>
                   )}
                   <span style={{ fontSize: 10, color: '#8b949e', background: '#0d1117', border: '1px solid #30363d', padding: '2px 7px', borderRadius: 10 }}>
@@ -539,7 +616,7 @@ export default function ScheduleManager({ onViewRuns }) {
 
                 <div style={{
                   fontSize: 11, fontFamily: 'monospace',
-                  color: isBitbucket ? '#3fb950' : isJira ? '#d2a679' : '#79c0ff',
+                  color: isBitbucket ? '#3fb950' : isJira ? '#d2a679' : isWorkflow ? '#79c0ff' : '#79c0ff',
                   background: '#0d1117', padding: '4px 8px', borderRadius: 4, marginBottom: 6,
                   wordBreak: 'break-all'
                 }}>
@@ -549,9 +626,10 @@ export default function ScheduleManager({ onViewRuns }) {
                 <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#8b949e', marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {isJira && <span style={{ color: '#484f58' }}>max {item.maxPerRun || 5}/run</span>}
                   {isBitbucket && item.argTemplate && <span style={{ color: '#484f58', fontFamily: 'monospace' }}>{item.argTemplate}</span>}
-                  <span style={{ color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {isWorkflow && item.workflowArgs && <span style={{ color: '#484f58', fontFamily: 'monospace' }}>{item.workflowArgs}</span>}
+                  {!isWorkflow && <span style={{ color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {item.projectPath?.split('/').pop()}
-                  </span>
+                  </span>}
                   <span style={{ color: '#484f58' }}>last: {timeAgo(item.lastRun)}</span>
                   <span style={{ color: item.enabled !== false ? '#8b949e' : '#484f58', marginLeft: 'auto' }}>
                     next: {item.enabled !== false ? timeUntil(item.nextRun) : 'paused'}
@@ -565,7 +643,7 @@ export default function ScheduleManager({ onViewRuns }) {
                     style={{ ...btnStyle('#1f4068', '#79c0ff'), padding: '4px 12px', fontSize: 11, border: '1px solid #1f6feb' }}
                   >
                     {actingId === item.id
-                      ? (isJira ? 'Querying JIRA…' : isBitbucket ? 'Checking commits…' : 'Triggering…')
+                      ? (isJira ? 'Querying JIRA…' : isBitbucket ? 'Checking commits…' : isWorkflow ? 'Starting workflow…' : 'Triggering…')
                       : '▶ Run Now'}
                   </button>
                 </div>

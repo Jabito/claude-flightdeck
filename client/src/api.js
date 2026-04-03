@@ -84,6 +84,63 @@ export async function saveProjectConfig(cfg) {
   return r.json();
 }
 
+// ─── Templates ────────────────────────────────────────────────────────────────
+
+export async function getTemplates() {
+  const r = await fetch(`${BASE}/templates`);
+  return r.json();
+}
+export async function createTemplate(data) {
+  const r = await fetch(`${BASE}/templates`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  return r.json();
+}
+export async function updateTemplate(id, data) {
+  const r = await fetch(`${BASE}/templates/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  return r.json();
+}
+export async function deleteTemplate(id) {
+  const r = await fetch(`${BASE}/templates/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+
+// ─── Workflows ────────────────────────────────────────────────────────────────
+
+export async function getWorkflows() {
+  const r = await fetch(`${BASE}/workflows`);
+  return r.json();
+}
+export async function createWorkflow(data) {
+  const r = await fetch(`${BASE}/workflows`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  return r.json();
+}
+export async function updateWorkflow(id, data) {
+  const r = await fetch(`${BASE}/workflows/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  return r.json();
+}
+export async function deleteWorkflow(id) {
+  const r = await fetch(`${BASE}/workflows/${id}`, { method: 'DELETE' });
+  return r.json();
+}
+export async function runWorkflowNow(id, initialArgs = '') {
+  const r = await fetch(`${BASE}/workflows/${id}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initialArgs }) });
+  return r.json();
+}
+
+// ─── Workflow runs ────────────────────────────────────────────────────────────
+
+export async function getWorkflowRuns() {
+  const r = await fetch(`${BASE}/workflow-runs`);
+  return r.json();
+}
+export async function killWorkflowRun(execId) {
+  const r = await fetch(`${BASE}/workflow-runs/${execId}`, { method: 'DELETE' });
+  return r.json();
+}
+export async function removeWorkflowRun(execId) {
+  const r = await fetch(`${BASE}/workflow-runs/${execId}/remove`, { method: 'DELETE' });
+  return r.json();
+}
+
 export async function deleteProject(projectPath) {
   const r = await fetch(`${BASE}/projects`, {
     method: 'DELETE',

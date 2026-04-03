@@ -1,6 +1,6 @@
 {
   "name": "claude-flightdeck",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Claude Flightdeck — visual control panel for Claude Code: file explorer, agent runner, webhooks, polls, and schedules",
   "main": "server.js",
   "scripts": {

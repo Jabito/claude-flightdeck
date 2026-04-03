@@ -6,7 +6,7 @@ async function getBitbucketRepos() {
   return r.json();
 }
 
-export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRunOutput, onRunStarted, rerunnableRun, onRerunnableConsumed }) {
+export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRunOutput, onRunStarted, rerunnableRun, onRerunnableConsumed, loadableTemplate, onLoadableConsumed }) {
   const [commands, setCommands] = useState([]);
   const [projects, setProjects] = useState([]);
   const [bbRepos, setBbRepos] = useState([]);
@@ -79,6 +79,28 @@ export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRu
     setProjectTab('local');
     onRerunnableConsumed?.();
   }, [rerunnableRun, commands]);
+
+  // Pre-populate form when loading a script template
+  useEffect(() => {
+    if (!loadableTemplate) return;
+    if (loadableTemplate.command && commands.length === 0) return;
+    if (loadableTemplate.command) {
+      setSelectedCommand(loadableTemplate.command);
+      setCmdArgs(loadableTemplate.args || '');
+      setCmdContext('');
+    } else {
+      setSelectedCommand('');
+      setCmdArgs('');
+      setCmdContext('');
+      setFreePrompt(loadableTemplate.freePrompt || '');
+    }
+    if (loadableTemplate.projectPath) {
+      setProjectPath(loadableTemplate.projectPath);
+      setProjectTab('local');
+    }
+    setAllowPermissions(loadableTemplate.allowPermissions ?? true);
+    onLoadableConsumed?.();
+  }, [loadableTemplate, commands]);
 
   const loadBbRepos = () => {
     if (bbRepos.length || bbLoading) return;
@@ -191,13 +213,23 @@ export default function ClaudeRunner({ selectedFile, addRun, updateRun, appendRu
 
           {/* Command selector */}
           <div>
-            <label style={labelStyle}>
-              Command
-              {autoSelected && (
-                <span style={{ marginLeft: 8, fontSize: 10, color: '#3fb950', background: '#0d2f1a', padding: '1px 6px', borderRadius: 4 }}>
-                  ← from explorer
-                </span>
-              )}
+            <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>
+                Command
+                {autoSelected && (
+                  <span style={{ marginLeft: 8, fontSize: 10, color: '#3fb950', background: '#0d2f1a', padding: '1px 6px', borderRadius: 4 }}>
+                    ← from explorer
+                  </span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('goto-scripts'))}
+                style={{ background: 'transparent', border: 'none', color: '#484f58', fontSize: 10, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}
+                title="Browse script templates"
+              >
+                ⊞ Templates
+              </button>
             </label>
             <select
               value={selectedCommand}

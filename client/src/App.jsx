@@ -8,6 +8,7 @@ import WebhookManager from './components/WebhookManager.jsx';
 import ScheduleManager from './components/ScheduleManager.jsx';
 import AutomationRunsPanel from './components/AutomationRunsPanel.jsx';
 import ProjectsManager from './components/ProjectsManager.jsx';
+import ScriptsManager from './components/ScriptsManager.jsx';
 import { getFileTree, getRelationships, saveFile, moveFile, getFile, getCommandRuns, streamRun } from './api.js';
 
 function NavItem({ icon, label, active, badge, badgeColor, onClick }) {
@@ -55,6 +56,7 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('');
   const [runs, setRuns] = useState([]);
   const [rerunnableRun, setRerunnableRun] = useState(null);
+  const [loadableTemplate, setLoadableTemplate] = useState(null);
 
   const addRun = useCallback((run) => setRuns(prev => [run, ...prev]), []);
   const updateRun = useCallback((id, patch) => setRuns(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r)), []);
@@ -108,6 +110,13 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // Navigate to Scripts tab from ClaudeRunner's "⊞ Templates" button
+  useEffect(() => {
+    const handler = () => { setPage('execute'); setExecuteTab('scripts'); };
+    window.addEventListener('goto-scripts', handler);
+    return () => window.removeEventListener('goto-scripts', handler);
   }, []);
 
   const handleSelectFile = useCallback(async (filePath) => {
@@ -194,6 +203,9 @@ export default function App() {
       }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: '#e6edf3', letterSpacing: -0.3 }}>
           ◈ Claude Flightdeck
+        </span>
+        <span style={{ fontSize: 10, color: '#484f58', background: '#21262d', border: '1px solid #30363d', borderRadius: 4, padding: '1px 6px', letterSpacing: 0.2 }}>
+          v2.0.0
         </span>
 
         <div style={{ width: 1, height: 18, background: '#30363d', margin: '0 2px' }} />
@@ -348,6 +360,7 @@ export default function App() {
                 badgeColor={pausedRunCount > 0 ? '#b45309' : activeRunCount > 0 ? '#f0883e' : undefined}
                 onClick={() => setExecuteTab('runs')}
               />
+              <NavItem icon="⊞" label="Scripts" active={executeTab === 'scripts'} onClick={() => setExecuteTab('scripts')} />
               <NavDivider />
               <NavItem icon="⚡" label="Webhooks" active={executeTab === 'webhooks'} onClick={() => setExecuteTab('webhooks')} />
               <NavItem icon="⏰" label="Scheduled Jobs" active={executeTab === 'schedules'} onClick={() => setExecuteTab('schedules')} />
@@ -367,6 +380,18 @@ export default function App() {
                   onRunStarted={() => setExecuteTab('runs')}
                   rerunnableRun={rerunnableRun}
                   onRerunnableConsumed={() => setRerunnableRun(null)}
+                  loadableTemplate={loadableTemplate}
+                  onLoadableConsumed={() => setLoadableTemplate(null)}
+                />
+              )}
+              {executeTab === 'scripts' && (
+                <ScriptsManager
+                  addRun={addRun}
+                  updateRun={updateRun}
+                  appendRunOutput={appendRunOutput}
+                  onRunStarted={() => setExecuteTab('runs')}
+                  onViewRuns={() => setExecuteTab('autoRuns')}
+                  onLoadTemplate={(tmpl) => { setLoadableTemplate(tmpl); setExecuteTab('runner'); }}
                 />
               )}
               {executeTab === 'runs' && (

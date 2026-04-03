@@ -220,20 +220,6 @@ function parseRelationships() {
     });
   } catch {}
 
-  // ── Hooks from settings.json
-  try {
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    if (settings.hooks) {
-      Object.entries(settings.hooks).forEach(([event, hookList]) => {
-        if (!Array.isArray(hookList)) return;
-        hookList.forEach((hook, i) => {
-          const id = `hook:${event}:${i}`;
-          const cmd = hook.hooks?.[0]?.command || hook.command || '';
-          nodes.push({ id, type: 'hook', label: event, path: settingsPath, command: cmd });
-        });
-      });
-    }
-  } catch {}
 
   // ── Hook scripts from ~/.claude/hooks/ directory
   const hooksDir = path.join(CLAUDE_DIR, 'hooks');
@@ -246,7 +232,7 @@ function parseRelationships() {
         const label = entry.name.replace(/\.[^.]+$/, ''); // strip extension
         const id = `hook:file:${entry.name}`;
         if (!nodes.find(n => n.id === id)) {
-          nodes.push({ id, type: 'hook', label, path: hookPath, command: entry.name });
+          nodes.push({ id, type: 'hook', label, path: hookPath, command: entry.name, domain: 'hooks' });
         }
       });
   } catch {}
@@ -1115,6 +1101,32 @@ function resolveTemplate(template, payload) {
   });
 }
 
+// Extract last balanced JSON object from text (Claude typically appends a JSON summary block)
+function extractLastJson(text) {
+  let depth = 0, end = -1;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] === '}') { if (end === -1) end = i; depth++; }
+    else if (text[i] === '{') {
+      if (--depth === 0 && end !== -1) {
+        try { return JSON.parse(text.slice(i, end + 1)); } catch { end = -1; }
+      }
+    }
+  }
+  return {};
+}
+
+// Convert "PROJ-123 targetFile=src/auth.ts" → { arg0: 'PROJ-123', targetFile: 'src/auth.ts' }
+function parseArgsToJson(str) {
+  if (!str?.trim()) return {};
+  const obj = {};
+  str.trim().split(/\s+/).forEach((p, i) => {
+    obj[`arg${i}`] = p;
+    const kv = p.match(/^(\w+)=(.+)$/);
+    if (kv) obj[kv[1]] = kv[2];
+  });
+  return obj;
+}
+
 function addWebhookRun(run) {
   webhookRunsStore.unshift(run);
   if (webhookRunsStore.length > MAX_WEBHOOK_RUNS) webhookRunsStore.pop();
@@ -1827,6 +1839,282 @@ app.post('/api/polls/:id/test', async (req, res) => {
   }
 });
 
+// ─── Script Templates ─────────────────────────────────────────────────────────
+
+const TEMPLATES_FILE = path.join(__dirname, 'templates.json');
+
+function loadTemplates() {
+  try { return JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8')); } catch { return []; }
+}
+function saveTemplates(list) {
+  try { fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(list, null, 2)); } catch {}
+}
+
+app.get('/api/templates', (_req, res) => res.json(loadTemplates()));
+
+app.post('/api/templates', (req, res) => {
+  const { name, description, command, args, freePrompt, projectPath, allowPermissions } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const tmpl = {
+    id: `tmpl-${Date.now()}`,
+    name, description: description || '',
+    command: command || '', args: args || '', freePrompt: freePrompt || '',
+    projectPath: projectPath || '',
+    allowPermissions: allowPermissions !== false,
+    createdAt: new Date().toISOString()
+  };
+  const list = loadTemplates();
+  list.push(tmpl);
+  saveTemplates(list);
+  res.json(tmpl);
+});
+
+app.put('/api/templates/:id', (req, res) => {
+  const list = loadTemplates();
+  const idx = list.findIndex(t => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Template not found' });
+  list[idx] = { ...list[idx], ...req.body, id: req.params.id };
+  saveTemplates(list);
+  res.json(list[idx]);
+});
+
+app.delete('/api/templates/:id', (req, res) => {
+  const list = loadTemplates();
+  if (!list.find(t => t.id === req.params.id)) return res.status(404).json({ error: 'Template not found' });
+  saveTemplates(list.filter(t => t.id !== req.params.id));
+  res.json({ success: true });
+});
+
+// ─── Workflows ────────────────────────────────────────────────────────────────
+
+const WORKFLOWS_FILE = path.join(__dirname, 'workflows.json');
+const WORKFLOW_RUNS_FILE = path.join(__dirname, 'workflow-runs.json');
+const MAX_WORKFLOW_RUNS = 50;
+
+function loadWorkflows() {
+  try { return JSON.parse(fs.readFileSync(WORKFLOWS_FILE, 'utf8')); } catch { return []; }
+}
+function saveWorkflows(list) {
+  try { fs.writeFileSync(WORKFLOWS_FILE, JSON.stringify(list, null, 2)); } catch {}
+}
+function loadWorkflowRuns() {
+  try {
+    const runs = JSON.parse(fs.readFileSync(WORKFLOW_RUNS_FILE, 'utf8'));
+    return runs.map(r => r.status === 'running'
+      ? { ...r, status: 'interrupted', endTime: new Date().toISOString() }
+      : r);
+  } catch { return []; }
+}
+function saveWorkflowRuns() {
+  try { fs.writeFileSync(WORKFLOW_RUNS_FILE, JSON.stringify(workflowRunsStore, null, 2)); } catch {}
+}
+
+const workflowRunsStore = loadWorkflowRuns();
+const workflowProcs = new Map(); // execId → child process
+
+// Spawn a single workflow step and return a Promise<exitCode>
+function spawnWorkflowStep(prompt, template, run, stepIndex) {
+  return new Promise((resolve) => {
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
+    if (template.allowPermissions) args.push('--dangerously-skip-permissions');
+
+    const proc = spawn(CLAUDE_BIN, args, {
+      cwd: template.projectPath,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    workflowProcs.set(run.execId, proc);
+
+    let buf = '';
+    proc.stdout.on('data', d => {
+      buf += d.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === 'assistant') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type === 'text' && block.text) {
+                run.output.push({ type: 'output', message: block.text, stepIndex });
+              } else if (block.type === 'tool_use' && block.name !== 'AskUserQuestion') {
+                run.output.push({ type: 'tool', message: `⚙ ${block.name}`, detail: toolDetail(block.name, block.input), stepIndex });
+              }
+            }
+          } else if (event.type === 'user') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type === 'tool_result') {
+                const content = Array.isArray(block.content)
+                  ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+                  : String(block.content ?? '');
+                if (content) run.output.push({ type: 'tool_result', message: content.slice(0, 500), stepIndex });
+              }
+            }
+          } else if (event.type === 'result' && event.is_error) {
+            run.output.push({ type: 'error', message: event.result ?? 'Unknown error', stepIndex });
+          }
+        } catch {
+          run.output.push({ type: 'output', message: line, stepIndex });
+        }
+      }
+    });
+    proc.stderr.on('data', d => run.output.push({ type: 'error', message: d.toString(), stepIndex }));
+    proc.on('close', (code) => { workflowProcs.delete(run.execId); resolve(code ?? 1); });
+    proc.on('error', (err) => {
+      workflowProcs.delete(run.execId);
+      run.output.push({ type: 'error', message: `spawn error: ${err.message}`, stepIndex });
+      resolve(1);
+    });
+  });
+}
+
+async function runWorkflow(workflowId, initialArgs = '') {
+  const workflow = loadWorkflows().find(w => w.id === workflowId);
+  if (!workflow) return;
+  const templates = loadTemplates();
+
+  const execId = `wf-run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const run = {
+    execId, source: 'workflow',
+    workflowId: workflow.id, workflowName: workflow.name,
+    status: 'running', output: [],
+    currentStep: 0, totalSteps: workflow.steps.length,
+    startTime: new Date().toISOString(), endTime: null, exitCode: null
+  };
+  workflowRunsStore.unshift(run);
+  if (workflowRunsStore.length > MAX_WORKFLOW_RUNS) workflowRunsStore.pop();
+  saveWorkflowRuns();
+
+  let prevJson = {};
+  const inputPayload = parseArgsToJson(initialArgs);
+
+  for (let i = 0; i < workflow.steps.length; i++) {
+    if (run.status === 'cancelled') break;
+
+    const step = workflow.steps[i];
+    const template = templates.find(t => t.id === step.templateId);
+    if (!template) {
+      run.output.push({ type: 'error', message: `Step ${i + 1}: template "${step.templateId}" not found`, stepIndex: i });
+      run.status = 'error';
+      break;
+    }
+
+    run.output.push({
+      type: 'step_separator',
+      message: `── Step ${i + 1} / ${workflow.steps.length}: ${step.label || template.name} ──`,
+      stepIndex: i
+    });
+    run.currentStep = i;
+    saveWorkflowRuns();
+
+    // Resolve args with {{prev.*}} and {{input.*}} tokens
+    const resolvedArgs = step.argsOverride != null && step.argsOverride !== ''
+      ? resolveTemplate(step.argsOverride, { prev: prevJson, input: inputPayload })
+      : template.args;
+
+    let prompt;
+    if (template.command) {
+      prompt = resolvedArgs?.trim()
+        ? `/${template.command} ${resolvedArgs.trim()}`
+        : `/${template.command}`;
+    } else {
+      prompt = resolveTemplate(template.freePrompt || '', { prev: prevJson, input: inputPayload });
+    }
+
+    if (!prompt || !template.projectPath) {
+      run.output.push({ type: 'error', message: `Step ${i + 1}: template has no prompt or projectPath`, stepIndex: i });
+      run.status = 'error';
+      break;
+    }
+
+    const exitCode = await spawnWorkflowStep(prompt, template, run, i);
+
+    if (run.status === 'cancelled') break;
+    if (exitCode !== 0) {
+      run.output.push({ type: 'error', message: `Step ${i + 1} failed (exit ${exitCode})`, stepIndex: i });
+      run.status = 'error';
+      run.exitCode = exitCode;
+      break;
+    }
+
+    // Extract JSON from this step's text output for next step's {{prev.*}} tokens
+    const stepText = run.output.filter(e => e.stepIndex === i && e.type === 'output').map(e => e.message).join('\n');
+    prevJson = extractLastJson(stepText);
+  }
+
+  if (run.status === 'running') { run.status = 'done'; run.exitCode = 0; }
+  run.currentStep = workflow.steps.length;
+  run.endTime = new Date().toISOString();
+  saveWorkflowRuns();
+}
+
+app.get('/api/workflows', (_req, res) => res.json(loadWorkflows()));
+
+app.post('/api/workflows', (req, res) => {
+  const { name, description, steps } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const wf = {
+    id: `wf-${Date.now()}`,
+    name, description: description || '',
+    steps: Array.isArray(steps) ? steps : [],
+    createdAt: new Date().toISOString()
+  };
+  const list = loadWorkflows();
+  list.push(wf);
+  saveWorkflows(list);
+  res.json(wf);
+});
+
+app.put('/api/workflows/:id', (req, res) => {
+  const list = loadWorkflows();
+  const idx = list.findIndex(w => w.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Workflow not found' });
+  list[idx] = { ...list[idx], ...req.body, id: req.params.id };
+  saveWorkflows(list);
+  res.json(list[idx]);
+});
+
+app.delete('/api/workflows/:id', (req, res) => {
+  const list = loadWorkflows();
+  if (!list.find(w => w.id === req.params.id)) return res.status(404).json({ error: 'Workflow not found' });
+  saveWorkflows(list.filter(w => w.id !== req.params.id));
+  res.json({ success: true });
+});
+
+app.post('/api/workflows/:id/run', (req, res) => {
+  const workflow = loadWorkflows().find(w => w.id === req.params.id);
+  if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+  const { initialArgs = '' } = req.body;
+  runWorkflow(workflow.id, initialArgs).catch(console.error);
+  res.json({ success: true });
+});
+
+app.get('/api/workflow-runs', (_req, res) => res.json(workflowRunsStore));
+
+app.delete('/api/workflow-runs/:execId', (req, res) => {
+  const run = workflowRunsStore.find(r => r.execId === req.params.execId);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const proc = workflowProcs.get(req.params.execId);
+  if (proc) { proc.kill(); workflowProcs.delete(req.params.execId); }
+  if (run.status === 'running') {
+    run.status = 'cancelled';
+    run.endTime = new Date().toISOString();
+    run.output.push({ type: 'meta', message: '⚠ Workflow cancelled by user' });
+  }
+  saveWorkflowRuns();
+  res.json({ success: true });
+});
+
+app.delete('/api/workflow-runs/:execId/remove', (req, res) => {
+  const idx = workflowRunsStore.findIndex(r => r.execId === req.params.execId);
+  if (idx === -1) return res.status(404).json({ error: 'Run not found' });
+  workflowRunsStore.splice(idx, 1);
+  saveWorkflowRuns();
+  res.json({ success: true });
+});
+
 // ─── Scheduled Runs ────────────────────────────────────────────────────────────
 
 const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
@@ -1939,6 +2227,22 @@ function spawnScheduleProcess(run) {
 }
 
 function triggerSchedule(schedule) {
+  // Workflow-sourced schedules delegate to the workflow engine
+  if (schedule.sourceType === 'workflow') {
+    if (!schedule.workflowId) return null;
+    runWorkflow(schedule.workflowId, schedule.workflowArgs || '').catch(console.error);
+    const list = loadSchedules();
+    const idx = list.findIndex(s => s.id === schedule.id);
+    if (idx !== -1) {
+      const intervalMs = (list[idx].intervalMinutes || 30) * 60 * 1000;
+      list[idx].lastRun = new Date().toISOString();
+      list[idx].nextRun = new Date(Date.now() + intervalMs).toISOString();
+      saveSchedules(list);
+    }
+    console.log(`  ⏰ Schedule "${schedule.name}": triggered workflow`);
+    return `wf-sched-${Date.now()}`;
+  }
+
   const prompt = buildSchedulePrompt(schedule);
   if (!prompt || !schedule.projectPath) return null;
 
@@ -2005,13 +2309,19 @@ function startScheduleTimer(schedule) {
 app.get('/api/schedules', (_req, res) => res.json(loadSchedules()));
 
 app.post('/api/schedules', (req, res) => {
-  const { name, intervalMinutes, command, args, freePrompt, projectPath, allowPermissions, enabled } = req.body;
-  if (!name || !projectPath) return res.status(400).json({ error: 'name and projectPath are required' });
+  const { name, intervalMinutes, command, args, freePrompt, projectPath, allowPermissions, enabled,
+          sourceType, workflowId, workflowArgs } = req.body;
+  const isWorkflow = sourceType === 'workflow';
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!isWorkflow && !projectPath) return res.status(400).json({ error: 'projectPath is required' });
   const schedule = {
     id: `sched-${Date.now()}`,
     name, intervalMinutes: intervalMinutes || 30,
+    sourceType: sourceType || 'prompt',
     command: command || '', args: args || '', freePrompt: freePrompt || '',
-    projectPath, allowPermissions: allowPermissions !== false,
+    projectPath: projectPath || '',
+    workflowId: workflowId || '', workflowArgs: workflowArgs || '',
+    allowPermissions: allowPermissions !== false,
     enabled: enabled !== false,
     createdAt: new Date().toISOString(), lastRun: null,
     nextRun: new Date(Date.now() + (intervalMinutes || 30) * 60 * 1000).toISOString()
@@ -2082,10 +2392,14 @@ app.delete('/api/schedules/runs/:execId/remove', (req, res) => {
 app.post('/api/schedules/:id/run', (req, res) => {
   const schedule = loadSchedules().find(s => s.id === req.params.id);
   if (!schedule) return res.status(404).json({ error: 'Schedule not found' });
-  const prompt = buildSchedulePrompt(schedule);
-  if (!prompt) return res.status(400).json({ error: 'Schedule has no command or prompt configured' });
-  if (!schedule.projectPath?.startsWith(os.homedir())) {
-    return res.status(400).json({ error: 'Project path is not configured or invalid' });
+  if (schedule.sourceType === 'workflow') {
+    if (!schedule.workflowId) return res.status(400).json({ error: 'Schedule has no workflow configured' });
+  } else {
+    const prompt = buildSchedulePrompt(schedule);
+    if (!prompt) return res.status(400).json({ error: 'Schedule has no command or prompt configured' });
+    if (!schedule.projectPath?.startsWith(os.homedir())) {
+      return res.status(400).json({ error: 'Project path is not configured or invalid' });
+    }
   }
   const execId = triggerSchedule(schedule);
   res.json({ success: true, execId });
